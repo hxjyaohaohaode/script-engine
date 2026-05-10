@@ -1,0 +1,38 @@
+[project]
+name = "script-engine-backend"
+version = "0.2.0"
+description = "互动影游剧本智能体集群 - 后端服务"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20.0",
+    "alembic>=1.14.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "redis>=5.2.0",
+    "httpx>=0.28.0",
+    "python-dotenv>=1.0.1",
+    "openai>=1.55.0",
+    "websockets>=14.1",
+    "pyyaml>=6.0.2",
+    "gitpython>=3.1.44",
+    "greenlet>=3.0.0",
+    "celery>=5.4.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "asyncpg>=0.30.0",
+    "psycopg2-binary>=2.9.10",
+    "pgvector>=0.3.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]

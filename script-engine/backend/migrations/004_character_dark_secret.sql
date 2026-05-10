@@ -1,0 +1,1 @@
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS dark_secret TEXT;

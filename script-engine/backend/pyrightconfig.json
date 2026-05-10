@@ -1,0 +1,39 @@
+{
+  "include": [
+    "api",
+    "core",
+    "models",
+    "services",
+    "middleware",
+    "websocket",
+    "tasks",
+    "schemas",
+    "checkers",
+    "utils",
+    "database.py",
+    "config.py",
+    "main.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "node_modules",
+    "tests"
+  ],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "reportMissingTypeStubs": false,
+  "reportOptionalMemberAccess": false,
+  "reportOptionalOperand": false,
+  "reportOptionalSubscript": false,
+  "reportGeneralTypeIssues": false,
+  "reportArgumentType": false,
+  "reportAttributeAccessIssue": false,
+  "reportCallIssue": false,
+  "reportReturnType": false,
+  "reportAssignmentType": false,
+  "reportIndexIssue": false,
+  "reportOperatorIssue": false
+}

@@ -1,0 +1,56 @@
+name: web_novel
+description: "网文小说生成，线性叙事，无分支。"
+scale_config: {}
+
+phases:
+  - name: 设定
+    human_gate: true
+    steps:
+      - agent: creator
+        skill: world_builder
+        input_from: [user_input]
+        output_to: layer0
+        cost_profile: quality
+      - agent: creator
+        skill: character_designer
+        input_from: [layer0]
+        output_to: layer0
+        cost_profile: quality
+
+  - name: 大纲
+    human_gate: true
+    steps:
+      - agent: creator
+        skill: outline_writer
+        input_from: [layer0]
+        output_to: layer3
+        cost_profile: quality
+
+  - name: 章节创作
+    human_gate: false
+    repeat_until: all_chapters_done
+    steps:
+      - agent: material
+        skill: rag_retriever
+        input_from: [layer1]
+        output_to: next_step
+        cost_profile: economy
+      - agent: creator
+        skill: scene_writer
+        input_from: [next_step, layer0]
+        output_to: layer2
+        cost_profile: balanced
+      - agent: auditor
+        skill: llm_audit
+        input_from: [layer2]
+        output_to: layer2
+        cost_profile: economy
+
+  - name: 终审
+    human_gate: true
+    steps:
+      - agent: auditor
+        skill: llm_audit
+        input_from: [layer0, layer5]
+        output_to: layer2
+        cost_profile: quality

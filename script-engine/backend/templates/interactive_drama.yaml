@@ -1,0 +1,136 @@
+name: interactive_drama
+description: "互动影游，20万字+，分支+伏笔+审计流水线。默认模板。"
+scale_config:
+  light:
+    max_parallel: 2
+    audit_skills: [llm_audit]
+  standard:
+    max_parallel: 3
+    audit_skills: [llm_audit, creative_score]
+  heavy:
+    max_parallel: 5
+    audit_skills: [llm_audit, creative_score]
+
+phases:
+  - name: 设定
+    human_gate: false
+    steps:
+      - agent: creator
+        skill: world_builder
+        input_from: [user_input]
+        output_to: layer0
+        cost_profile: quality
+        timeout: 600
+      - agent: creator
+        skill: character_designer
+        input_from: [layer0]
+        output_to: layer0
+        cost_profile: quality
+        timeout: 600
+      - agent: creator
+        skill: relation_network_designer
+        input_from: [layer0]
+        output_to: layer0
+        cost_profile: quality
+        timeout: 600
+      - agent: foreshadow
+        skill: foreshadow_designer
+        input_from: [layer0]
+        output_to: layer0
+        cost_profile: quality
+        timeout: 600
+      - agent: foreshadow
+        skill: foreshadow_reaction
+        input_from: [layer0]
+        output_to: layer0
+        cost_profile: quality
+        timeout: 600
+
+  - name: 大纲
+    human_gate: false
+    steps:
+      - agent: creator
+        skill: chapter_outliner
+        input_from: [layer0]
+        output_to: layer3
+        cost_profile: quality
+        timeout: 900
+
+  - name: 场景创作
+    human_gate: false
+    repeat_until: all_scenes_done
+    steps:
+      - agent: material
+        skill: rag_retriever
+        input_from: [layer0, layer1, layer3]
+        output_to: next_step
+        cost_profile: economy
+        timeout: 300
+      - agent: creator
+        skill: scene_writer
+        input_from: [next_step, layer0]
+        output_to: layer2
+        cost_profile: quality
+        timeout: 900
+      - agent: auditor
+        skill: llm_audit
+        input_from: [layer2]
+        output_to: layer2
+        cost_profile: economy
+        timeout: 300
+      - agent: state_manager
+        skill: state_updater
+        input_from: [layer2]
+        output_to: layer1
+        cost_profile: economy
+        timeout: 300
+
+  - name: 互动设计
+    human_gate: false
+    steps:
+      - agent: creator
+        skill: choice_designer
+        input_from: [layer0, layer2, layer3]
+        output_to: layer4
+        cost_profile: quality
+        timeout: 600
+      - agent: auditor
+        skill: branch_reachability_checker
+        input_from: [layer4]
+        output_to: layer4
+        cost_profile: economy
+        timeout: 300
+
+  - name: 终审
+    human_gate: true
+    steps:
+      - agent: auditor
+        skill: choice_validity_audit
+        input_from: [layer0, layer4, layer5]
+        output_to: layer5
+        cost_profile: quality
+        timeout: 600
+      - agent: auditor
+        skill: branch_reachability_audit
+        input_from: [layer4, layer5]
+        output_to: layer5
+        cost_profile: quality
+        timeout: 300
+      - agent: auditor
+        skill: consequence_consistency_audit
+        input_from: [layer4, layer5]
+        output_to: layer5
+        cost_profile: quality
+        timeout: 300
+      - agent: auditor
+        skill: foreshadow_recovery_audit
+        input_from: [layer0, layer5]
+        output_to: layer5
+        cost_profile: quality
+        timeout: 300
+      - agent: auditor
+        skill: llm_audit
+        input_from: [layer0, layer5]
+        output_to: layer5
+        cost_profile: quality
+        timeout: 600

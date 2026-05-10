@@ -1,0 +1,13 @@
+name: short_video
+description: "短视频脚本，单场景，强节奏。"
+scale_config: {}
+
+phases:
+  - name: 创作
+    human_gate: false
+    steps:
+      - agent: creator
+        skill: scene_writer
+        input_from: [user_input]
+        output_to: layer2
+        cost_profile: balanced
