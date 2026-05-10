@@ -454,6 +454,7 @@ class CreatorAgent(BaseAgent):
         "character_designer": CHARACTER_DESIGNER_SKILL,
         "relation_network_designer": RELATION_NETWORK_DESIGNER_SKILL,
         "outline_writer": OUTLINE_WRITER_SKILL,
+        "chapter_outliner": OUTLINE_WRITER_SKILL,
     }
 
     THINKING_MODE_RULES = {

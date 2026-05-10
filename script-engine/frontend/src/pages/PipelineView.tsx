@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Card, Button, Tag, App, Progress, Spin, Empty, Checkbox, Input } from 'antd'
+import { Card, Button, Tag, App, Progress, Spin, Empty, Checkbox, Input, Popconfirm, Select } from 'antd'
 import {
   PlayCircleOutlined, CheckCircleOutlined, CloseCircleOutlined,
-  SyncOutlined, ThunderboltOutlined, ReloadOutlined,
+  SyncOutlined, ThunderboltOutlined, ReloadOutlined, StepBackwardOutlined,
 } from '@ant-design/icons'
 import { api, pipelineApi } from '../api/client'
 import { useProjectStore } from '../stores/projectStore'
@@ -66,6 +66,9 @@ export default function PipelineView() {
   const [approving, setApproving] = useState(false)
   const [rejecting, setRejecting] = useState(false)
   const [retrying, setRetrying] = useState(false)
+  const [rollingBack, setRollingBack] = useState(false)
+  const [rollbackPhase, setRollbackPhase] = useState<number>(0)
+  const [rollbackStep, setRollbackStep] = useState<number>(0)
   const advancingRef = useRef(false)
   const mountedRef = useRef(true)
   const fetchingRef = useRef(false)
@@ -208,7 +211,6 @@ export default function PipelineView() {
       await pipelineApi.retry(projectId)
       notification.success({ message: '已重新开始', description: '从失败步骤继续执行', placement: 'topRight' })
       await fetchStatus()
-      // 重试成功后自动推进
       setTimeout(() => handleAdvance(), 500)
     } catch (e: any) {
       setError(e?.detail || e?.message || '重试失败')
@@ -216,6 +218,29 @@ export default function PipelineView() {
       setRetrying(false)
     }
   }
+
+  const handleRollback = async () => {
+    if (!projectId || rollingBack) return
+    setRollingBack(true)
+    setError('')
+    try {
+      await pipelineApi.rollback(projectId, rollbackPhase, rollbackStep)
+      notification.success({
+        message: '已回退',
+        description: `回退到阶段${rollbackPhase}步骤${rollbackStep}，请点击「推进下一步」重新执行`,
+        placement: 'topRight',
+      })
+      await fetchStatus()
+    } catch (e: any) {
+      setError(e?.detail || e?.message || '回退失败')
+    } finally {
+      setRollingBack(false)
+    }
+  }
+
+  const isDependencyError = status?.error_message?.includes('依赖的前置步骤尚未完成')
+  const failedPhaseIdx = status?.current_phase ?? 0
+  const failedStepIdx = status?.current_step ?? 0
 
   if (!projectId) {
     return (
@@ -359,14 +384,108 @@ export default function PipelineView() {
             </div>
           )}
           {isFailed && (
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={handleRetry}
-              loading={retrying}
-              style={{ background: '#f59e0b', borderColor: '#f59e0b', color: '#fff' }}
-            >
-              {retrying ? '重试中...' : '重试'}
-            </Button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={handleRetry}
+                loading={retrying}
+                style={{ background: '#f59e0b', borderColor: '#f59e0b', color: '#fff' }}
+              >
+                {retrying ? '重试中...' : '重试当前步骤'}
+              </Button>
+              {isDependencyError && (
+                <Popconfirm
+                  title="回退到缺失的依赖步骤"
+                  description={
+                    <div style={{ maxWidth: 280 }}>
+                      <p style={{ margin: '0 0 8px', color: '#ef4444', fontSize: 12 }}>
+                        检测到依赖缺失，建议回退到该步骤之前的步骤重新执行
+                      </p>
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                        <Select
+                          size="small"
+                          value={rollbackPhase}
+                          onChange={(v) => { setRollbackPhase(v); setRollbackStep(0) }}
+                          style={{ width: 120 }}
+                          options={template?.phases?.map((p, i) => ({ label: p.name, value: i })) || []}
+                          placeholder="阶段"
+                        />
+                        <Select
+                          size="small"
+                          value={rollbackStep}
+                          onChange={(v) => setRollbackStep(v)}
+                          style={{ width: 80 }}
+                          options={
+                            template?.phases?.[rollbackPhase]?.steps?.map((_, i) => ({
+                              label: `步骤${i}`,
+                              value: i,
+                            })) || []
+                          }
+                          placeholder="步骤"
+                        />
+                      </div>
+                    </div>
+                  }
+                  onConfirm={handleRollback}
+                  okText="确认回退"
+                  cancelText="取消"
+                >
+                  <Button
+                    icon={<StepBackwardOutlined />}
+                    loading={rollingBack}
+                    danger
+                  >
+                    回退修复
+                  </Button>
+                </Popconfirm>
+              )}
+              {!isDependencyError && (
+                <Popconfirm
+                  title="回退到指定步骤重新执行"
+                  description={
+                    <div style={{ maxWidth: 280 }}>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <Select
+                          size="small"
+                          value={rollbackPhase}
+                          onChange={(v) => { setRollbackPhase(v); setRollbackStep(0) }}
+                          style={{ width: 120 }}
+                          options={template?.phases?.map((p, i) => ({ label: p.name, value: i })) || []}
+                          placeholder="阶段"
+                        />
+                        <Select
+                          size="small"
+                          value={rollbackStep}
+                          onChange={(v) => setRollbackStep(v)}
+                          style={{ width: 80 }}
+                          options={
+                            template?.phases?.[rollbackPhase]?.steps?.map((_, i) => ({
+                              label: `步骤${i}`,
+                              value: i,
+                            })) || []
+                          }
+                          placeholder="步骤"
+                        />
+                      </div>
+                      <p style={{ margin: '8px 0 0', fontSize: 11, color: '#6b7280' }}>
+                        回退后该步骤及其后续步骤将重新执行
+                      </p>
+                    </div>
+                  }
+                  onConfirm={handleRollback}
+                  okText="确认回退"
+                  cancelText="取消"
+                >
+                  <Button
+                    icon={<StepBackwardOutlined />}
+                    loading={rollingBack}
+                    danger
+                  >
+                    回退修复
+                  </Button>
+                </Popconfirm>
+              )}
+            </div>
           )}
           {isCancelled && (
             <Button

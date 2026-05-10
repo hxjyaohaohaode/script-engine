@@ -536,6 +536,25 @@ class PipelineExecutor:
                     step_info = result.get("step_failed", {})
                     step_name = f"{step_info.get('agent', '?')}.{step_info.get('skill', '?')}"
                     error_msg = result.get("message", "未知错误")
+                    dep_error = result.get("result", {}).get("dependency_error", False)
+
+                    if dep_error:
+                        rollback_target = await self._find_missing_dep_rollback_target(project_id, error_msg)
+                        if rollback_target:
+                            target_phase, target_step, target_skill = rollback_target
+                            logger.info(
+                                "依赖缺失检测: 当前步骤 '%s' 因缺少 '%s' 失败，自动回退到阶段%d步骤%d重做 '%s'",
+                                step_info.get('skill', '?'), target_skill, target_phase, target_step, target_skill
+                            )
+                            await self._notify_progress(
+                                project_id, "回退修复", 0, 0, step_info.get('agent', ''), step_info.get('skill', ''),
+                                "retrying",
+                                f"检测到前置步骤 '{target_skill}' 数据缺失，自动回退修复...",
+                                0
+                            )
+                            await self.state_machine.rollback_to_step(project_id, target_phase, target_step)
+                            consecutive_failures = 0
+                            continue
 
                     if consecutive_failures < MAX_CONSECUTIVE_FAILURES:
                         wait_seconds = min(30, 5 * consecutive_failures)
@@ -602,6 +621,73 @@ class PipelineExecutor:
         except Exception as e:
             logger.error("重试状态恢复失败: %s", e)
             return False
+
+    SKILL_TO_DEP_BLOCKER = {
+        "character_designer": "world_builder",
+        "relation_network_designer": "character_designer",
+        "foreshadow_designer": "world_builder",
+        "chapter_outliner": "world_builder",
+        "outline_writer": "world_builder",
+        "scene_writer": "world_builder",
+        "component_writer": "world_builder",
+        "chapter_writer": "world_builder",
+        "novel_writer": "world_builder",
+        "choice_designer": "chapter_outliner",
+        "branch_reachability_checker": "choice_designer",
+        "choice_validity_audit": "choice_designer",
+        "branch_reachability_audit": "choice_designer",
+        "consequence_consistency_audit": "choice_designer",
+        "foreshadow_recovery_audit": "foreshadow_designer",
+    }
+
+    async def _find_missing_dep_rollback_target(self, project_id: str, error_msg: str) -> tuple[int, int, str] | None:
+        """解析依赖缺失错误消息，在流水线模板中查找缺失依赖步骤的准确位置"""
+        try:
+            state = await self.state_machine.get_state(project_id)
+            if not state:
+                return None
+
+            from .template_loader import get_template as _get_tpl
+            template = _get_tpl(state.template_name)
+            current_skill = None
+            if state.current_phase_index < len(template.phases):
+                phase = template.phases[state.current_phase_index]
+                if state.current_step_index < len(phase.steps):
+                    current_skill = phase.steps[state.current_step_index].skill
+
+            target_skill = None
+            if current_skill:
+                target_skill = self.SKILL_TO_DEP_BLOCKER.get(current_skill)
+
+            if not target_skill:
+                import re
+                match = re.search(r"'(world_builder|character_designer|chapter_outliner|outline_writer|foreshadow_designer|relation_network_designer|choice_designer)'", error_msg)
+                if match:
+                    target_skill = match.group(1)
+
+            if not target_skill:
+                return None
+
+            for p_idx, ph in enumerate(template.phases):
+                if p_idx > state.current_phase_index:
+                    break
+                start_s = 0 if p_idx < state.current_phase_index else 0
+                for s_idx in range(start_s, len(ph.steps)):
+                    st = ph.steps[s_idx]
+                    if st.skill == target_skill:
+                        if p_idx == state.current_phase_index and s_idx >= state.current_step_index:
+                            continue
+                        return (p_idx, s_idx, target_skill)
+
+            for p_idx, ph in enumerate(template.phases):
+                for s_idx, st in enumerate(ph.steps):
+                    if st.skill == target_skill:
+                        return (p_idx, s_idx, target_skill)
+
+            return None
+        except Exception as e:
+            logger.error("查找依赖回退目标失败: %s", e)
+            return None
 
     async def approve(self, project_id: str) -> dict:
         """批准当前阶段的人工审核门"""
@@ -781,6 +867,7 @@ class PipelineExecutor:
                         await self._notify_data_changed(project_id, "world_config_updated", {"has_data": True})
                     else:
                         logger.error("world_builder 未生成有效世界观数据，且原始文本过短")
+                        raise RuntimeError("world_builder 未生成有效世界观数据")
 
             elif skill == "character_designer":
                 text = data.get("characters", "")
@@ -805,8 +892,8 @@ class PipelineExecutor:
                         await self._notify_data_changed(project_id, "character_created",
                                                          {"entity_id": c.get("name", "")})
                 else:
-                    logger.warning("character_designer 未生成有效角色数据，标记为已构建以继续流水线")
-                    await self.state_machine.update_result_data(project_id, "layer0_characters_built", True)
+                    logger.warning("character_designer 未生成有效角色数据")
+                    raise RuntimeError("character_designer 未生成有效角色数据，无法继续流水线")
 
             elif skill == "foreshadow_designer":
                 text = data.get("foreshadows", data.get("foreshadow_designs", ""))
@@ -830,8 +917,8 @@ class PipelineExecutor:
                         await self._notify_data_changed(project_id, "foreshadow_created",
                                                          {"entity_id": fs.get("name", "")})
                 else:
-                    logger.warning("foreshadow_designer 未生成有效伏笔数据，标记为已构建以继续流水线")
-                    await self.state_machine.update_result_data(project_id, "layer0_foreshadows_built", True)
+                    logger.warning("foreshadow_designer 未生成有效伏笔数据")
+                    raise RuntimeError("foreshadow_designer 未生成有效伏笔数据，无法继续流水线")
 
             elif skill in ("outline_writer", "chapter_outliner"):
                 text = data.get("outline", data.get("chapters", data.get("outlines", "")))
@@ -851,8 +938,8 @@ class PipelineExecutor:
                                                          {"entity_id": ch.get("title", ch.get("标题", ""))})
                     await self._persist_chapter_sections(project_id, ch_list)
                 else:
-                    logger.warning("chapter_outliner 未生成有效章节数据，标记为已构建以继续流水线")
-                    await self.state_machine.update_result_data(project_id, "layer3_outline_built", True)
+                    logger.warning("chapter_outliner 未生成有效章节数据")
+                    raise RuntimeError("chapter_outliner 未生成有效章节数据，无法继续流水线")
 
             elif skill in ("scene_writer", "component_writer", "chapter_writer", "novel_writer"):
                 await self._persist_scene_result(project_id, data, state)
@@ -871,8 +958,8 @@ class PipelineExecutor:
                     await self.state_machine.update_result_data(project_id, "layer0_relations_built", True)
                     await self._notify_data_changed(project_id, "relation_created", {})
                 else:
-                    logger.warning("relation_network_designer 未生成有效关系数据，标记为已构建以继续流水线")
-                    await self.state_machine.update_result_data(project_id, "layer0_relations_built", True)
+                    logger.warning("relation_network_designer 未生成有效关系数据")
+                    raise RuntimeError("relation_network_designer 未生成有效关系数据，无法继续流水线")
 
             elif skill == "choice_designer":
                 await self._persist_choice_designer_result(project_id, data, state)
@@ -1019,9 +1106,8 @@ class PipelineExecutor:
             if isinstance(choices_data, str):
                 choices_data = self._extract_json(choices_data)
             if not isinstance(choices_data, list) or not choices_data:
-                logger.warning("choice_designer 未生成有效选择数据，标记为已构建以继续流水线")
-                await self.state_machine.update_result_data(project_id, "layer4_choices_built", True)
-                return
+                logger.warning("choice_designer 未生成有效选择数据")
+                raise RuntimeError("choice_designer 未生成有效选择数据，无法继续流水线")
 
             sections_in_db = {}
             sec_result = await self.db.execute(

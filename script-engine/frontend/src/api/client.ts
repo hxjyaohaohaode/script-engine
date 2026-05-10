@@ -560,6 +560,10 @@ export const pipelineApi = {
     api.post<{ status: string; reason: string }>(`/projects/${projectId}/pipeline/reject`, { reason }),
   retry: (projectId: string) =>
     api.post<{ status: string; message: string }>(`/projects/${projectId}/pipeline/retry`),
+  resume: (projectId: string) =>
+    api.post<{ status: string; message: string }>(`/projects/${projectId}/pipeline/resume`),
+  rollback: (projectId: string, phase: number, step: number) =>
+    api.post<{ status: string; target_phase: number; target_step: number; message: string }>(`/projects/${projectId}/pipeline/rollback`, { phase, step }),
   templates: () =>
     api.get<{ templates: { name: string; description: string; phases: number }[] }>(`/pipeline/templates`),
   getTemplate: (name: string) =>

@@ -240,6 +240,59 @@ class PipelineStateMachine:
         await self._save(state)
         return state
 
+    async def rollback_to_step(self, project_id: str, phase_idx: int, step_idx: int):
+        state = await self.get_state(project_id)
+        if not state:
+            raise ValueError(f"Pipeline state not found for {project_id}")
+        state.current_phase_index = max(0, phase_idx)
+        state.current_step_index = max(0, step_idx)
+        state.status = PipelineStatus.RUNNING
+        state.error_message = ""
+
+        rolled_back_key = f"{phase_idx}-{step_idx}"
+        results = list(state.task_results)
+        new_results = []
+        for tr in results:
+            tr_key = tr.get("key", "")
+            tr_phase = int(tr_key.split("-")[0]) if "-" in tr_key else -1
+            tr_step = int(tr_key.split("-")[1]) if "-" in tr_key and len(tr_key.split("-")) > 1 else -1
+            if tr_phase < phase_idx or (tr_phase == phase_idx and tr_step < step_idx):
+                new_results.append(tr)
+        new_results.append({
+            "key": rolled_back_key,
+            "phase": "",
+            "agent": "系统",
+            "skill": "rollback",
+            "status": "retrying",
+            "retried_at": datetime.now(UTC).isoformat(),
+            "rollback_reason": f"回退到阶段{phase_idx}步骤{step_idx}，后续步骤结果已清除",
+        })
+        state.task_results = new_results
+
+        artifact_keys_to_clear = []
+        for key in list(state.result_data.keys()):
+            if key.startswith("layer") and key.endswith("_built"):
+                layer_name = key.split("_", 1)[1] if "_" in key else ""
+                dep_phase = self._estimate_dep_phase(layer_name)
+                if dep_phase is not None and dep_phase >= phase_idx:
+                    artifact_keys_to_clear.append(key)
+
+        for key in artifact_keys_to_clear:
+            state.result_data.pop(key, None)
+
+        await self._save(state)
+        return state
+
+    def _estimate_dep_phase(self, layer_name: str) -> int | None:
+        phase_map = {
+            "world_built": 0, "characters_built": 0, "foreshadows_built": 0, "relations_built": 0,
+            "outline_built": 1, "scenes_built": 2, "choices_built": 2,
+            "choice_audit_built": 3, "branch_audit_built": 3,
+            "consequence_audit_built": 3, "foreshadow_audit_built": 3,
+            "branch_checked": 3,
+        }
+        return phase_map.get(layer_name)
+
     async def _save(self, state: PipelineState):
         params = {
             "pid": state.project_id,

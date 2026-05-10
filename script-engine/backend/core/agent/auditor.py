@@ -118,6 +118,11 @@ class AuditorAgent(BaseAgent):
         "llm_audit": AUDIT_SKILL,
         "creative_score": CREATIVE_SCORE_SKILL,
         "full_audit": FULL_AUDIT_SKILL,
+        "branch_reachability_checker": AUDIT_SKILL,
+        "choice_validity_audit": AUDIT_SKILL,
+        "branch_reachability_audit": AUDIT_SKILL,
+        "consequence_consistency_audit": AUDIT_SKILL,
+        "foreshadow_recovery_audit": AUDIT_SKILL,
     }
 
     async def execute(self, task: AgentTask) -> AgentResult:
@@ -255,11 +260,7 @@ class AuditorAgent(BaseAgent):
         return {"scene_context": scene_context}
 
     def _select_skill(self, task_type: str) -> Skill:
-        """选择技能 - 重写父类方法以返回具体的Skill对象"""
-        return self.skills.get(task_type)
-        """选择技能 - 重写父类方法以返回具体的Skill对象"""
-        return self.skills.get(task_type)
-        return self.skills[task_type]
+        return self.skills.get(task_type, self.skills["llm_audit"])
 
     async def _phase_a_programmatic_checks(
         self, project_id: str, scene_id: str, payload: dict

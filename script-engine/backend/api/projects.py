@@ -727,9 +727,15 @@ async def get_dashboard(project_id: str, db: AsyncSession = Depends(get_db)):
             .where(EmotionCurve.chapter_id == ch.id)
         )
         avg_emotion = avg_emotion_result.scalar_one()
+        if avg_emotion is not None:
+            emotion_value = float(avg_emotion)
+        elif ch.emotion_target is not None:
+            emotion_value = float(ch.emotion_target)
+        else:
+            emotion_value = 0.0
         emotion_preview.append({
             "chapter": ch.title or f"第{ch.chapter_number}章",
-            "emotion": float(avg_emotion) if avg_emotion is not None else 0.0,
+            "emotion": emotion_value,
         })
 
     fs_health_result = await db.execute(

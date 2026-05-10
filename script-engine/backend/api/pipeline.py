@@ -227,6 +227,38 @@ async def resume_pipeline(project_id: str, background_tasks: BackgroundTasks,
         raise HTTPException(status_code=500, detail=f"恢复流水线失败: {str(e)[:200]}")
 
 
+@router.post("/rollback")
+async def rollback_pipeline(project_id: str, payload: dict | None = Body(default=None), db: AsyncSession = Depends(get_db)):
+    payload = payload or {}
+    target_phase = payload.get("phase", payload.get("phase_idx"))
+    target_step = payload.get("step", payload.get("step_idx"))
+
+    if target_phase is None or target_step is None:
+        raise HTTPException(status_code=400, detail="必须指定 target_phase 和 target_step 参数")
+
+    try:
+        target_phase = int(target_phase)
+        target_step = int(target_step)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="phase 和 step 必须是整数")
+
+    sm = PipelineStateMachine(db)
+    state = await sm.get_state(project_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Pipeline未初始化")
+
+    if state.status == PipelineStatus.RUNNING:
+        raise HTTPException(status_code=409, detail="流水线正在运行中，请先取消后再回退")
+
+    await sm.rollback_to_step(project_id, target_phase, target_step)
+    return {
+        "status": "rolled_back",
+        "target_phase": target_phase,
+        "target_step": target_step,
+        "message": f"已回退到阶段{target_phase}步骤{target_step}，后续步骤的完成标记已清除",
+    }
+
+
 @public_router.get("/templates")
 async def list_pipeline_templates():
     from core.pipeline.template_loader import list_templates as _list
