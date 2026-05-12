@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.gateway.client import ModelGateway
 from core.rag.retriever import RAGRetriever
+from core.rag.indexer import RAGIndexer
 from core.storage.service import StorageService
 from core.agent.base import AgentTask
 from core.agent.registry import get_agent
@@ -160,7 +161,7 @@ class PipelineExecutor:
                 f"跳过阶段 '{phase.name}'（不在目标阶段列表中）",
                 self._calc_progress(template, state),
             )
-            return await self._start_next_phase(project_id, template, state)
+            return await self._start_next_phase(project_id, template)
 
         if state.current_step_index >= len(phase.steps):
             if phase.repeat_until:
@@ -192,11 +193,47 @@ class PipelineExecutor:
                     "message": f"阶段 '{phase.name}' 完成，等待审核",
                 }
             else:
+                await self._reindex_all_content(project_id)
                 await self.state_machine.advance_phase(project_id)
-                return await self._start_next_phase(project_id, template, state)
+                return await self._start_next_phase(project_id, template)
 
         step = phase.steps[state.current_step_index]
         total_steps = len(phase.steps)
+
+        step_flag = f"layer{state.current_phase_index}_{step.skill}_built"
+        if state.result_data.get(step_flag) and not getattr(self, 'force_regenerate', False):
+            logger.info("跳过已完成步骤: %s.%s (flag=%s)", phase.name, step.skill, step_flag)
+            await self.state_machine.advance_step(project_id)
+            await self._notify_progress(
+                project_id, phase.name, state.current_step_index + 1, total_steps,
+                step.agent, step.skill, "skipped",
+                f"跳过已完成: {step.skill}",
+                self._calc_progress(template, state),
+            )
+            return {"status": "ok", "message": f"跳过已完成步骤: {step.skill}"}
+
+        if step.skill == "scene_writer":
+            scene_plan = state.result_data.get("next_step", {})
+            if scene_plan.get("status") == "all_done":
+                logger.info("rag_retriever 检测到所有场景已完成，跳过 scene_writer")
+                await self.state_machine.advance_step(project_id)
+                await self._notify_progress(
+                    project_id, phase.name, state.current_step_index + 1, total_steps,
+                    step.agent, step.skill, "skipped",
+                    "所有场景已生成完毕，跳过场景写作",
+                    self._calc_progress(template, state),
+                )
+                return {"status": "ok", "message": "所有场景已生成完毕，跳过场景写作"}
+            if scene_plan.get("status") == "no_chapters":
+                logger.info("rag_retriever 检测到无章节大纲，跳过 scene_writer")
+                await self.state_machine.mark_failed(project_id, "缺少章节大纲，无法生成场景")
+                await self._notify_progress(
+                    project_id, phase.name, state.current_step_index, total_steps,
+                    step.agent, step.skill, "failed",
+                    "无章节大纲，场景写作阶段终止",
+                    self._calc_progress(template, state),
+                )
+                return {"status": "failed", "message": "缺少章节大纲，无法生成场景"}
 
         await self._notify_progress(project_id, phase.name,
                                      state.current_step_index, total_steps,
@@ -208,6 +245,8 @@ class PipelineExecutor:
                                          f"{phase.name}: {step.skill}")
 
         result = await self._execute_step_with_retry(project_id, template, phase, step, state)
+
+        state = await self.state_machine.get_state(project_id) or state
 
         await self.state_machine.append_result(project_id, {
             "key": f"{state.current_phase_index}-{state.current_step_index}",
@@ -445,6 +484,11 @@ class PipelineExecutor:
                 cost_profile="economy",
             )
             audit_result = await auditor.execute(audit_task)
+
+            await self._persist_audit_record(
+                project_id, scene_id, "auto_scene", audit_result
+            )
+
             if audit_result.status == "fail":
                 return {
                     "overall": "fail",
@@ -455,8 +499,65 @@ class PipelineExecutor:
             logger.error("自动审计失败，按失败处理: %s", e)
             return {"overall": "fail", "issues": [f"自动审计执行失败: {str(e)[:200]}"]}
 
-    async def auto_run(self, project_id: str) -> dict:
+    async def _persist_audit_record(self, project_id: str, scene_id: str,
+                                     audit_type: str, audit_result):
+        try:
+            import uuid as _uuid
+            from datetime import UTC, datetime as _dt
+
+            overall = "pass"
+            if hasattr(audit_result, 'status'):
+                overall = "pass" if audit_result.status in ("completed", "pass") else "fail"
+            elif isinstance(audit_result, dict):
+                overall = audit_result.get("overall", "pass")
+
+            data = {}
+            if hasattr(audit_result, 'data') and isinstance(audit_result.data, dict):
+                data = audit_result.data
+            elif isinstance(audit_result, dict):
+                data = audit_result
+
+            checker_results = data.get("phase_a", {})
+            llm_results = data.get("phase_b")
+            creative_scores = data.get("phase_c")
+            issues = data.get("issues", [])
+            suggestions = data.get("suggestions", [])
+
+            if hasattr(audit_result, 'issues') and audit_result.issues:
+                issues = audit_result.issues
+
+            audit_id = str(_uuid.uuid4())
+            now_expr = "datetime('now')" if _IS_SQLITE else "NOW()"
+
+            await self.db.execute(
+                __import__("sqlalchemy").text(
+                    f"""INSERT INTO audit_records
+                    (id, project_id, scene_id, audit_type, checker_results,
+                     llm_results, creative_scores, overall_result, issues, suggestions, created_at)
+                    VALUES (:id, :pid, :sid, :atype, :checker,
+                            :llm, :creative, :overall, :issues, :suggestions, {now_expr})"""
+                ),
+                {
+                    "id": audit_id,
+                    "pid": project_id,
+                    "sid": scene_id,
+                    "atype": audit_type,
+                    "checker": json.dumps(checker_results, ensure_ascii=False) if isinstance(checker_results, dict) else "{}",
+                    "llm": json.dumps(llm_results, ensure_ascii=False) if llm_results else None,
+                    "creative": json.dumps(creative_scores, ensure_ascii=False) if creative_scores else None,
+                    "overall": overall,
+                    "issues": json.dumps(issues, ensure_ascii=False) if isinstance(issues, list) else "[]",
+                    "suggestions": json.dumps(suggestions, ensure_ascii=False) if isinstance(suggestions, list) else "[]",
+                },
+            )
+            await self.db.commit()
+            logger.info("Audit record persisted: scene=%s, overall=%s", scene_id, overall)
+        except Exception as e:
+            logger.warning("持久化审计记录失败: %s", str(e))
+
+    async def auto_run(self, project_id: str, force_regenerate: bool = False) -> dict:
         self._cancelled_projects.discard(project_id)
+        self.force_regenerate = force_regenerate
 
         state = await self.state_machine.get_state(project_id)
         template_name = state.template_name if state else ""
@@ -513,10 +614,19 @@ class PipelineExecutor:
 
                 result = await self.advance(project_id)
                 status = result.get("status")
+                logger.info(
+                    "auto_run advance 返回: status=%s, phase=%s, message=%s",
+                    status, result.get("phase", ""), result.get("message", "")[:100],
+                )
 
                 if status == "completed":
                     await self._notify_progress(project_id, "完成", 0, 0, "系统", "", "completed", "流水线全部完成!", 100)
                     return result
+
+                if status == "ok":
+                    consecutive_failures = 0
+                    await asyncio.sleep(0.3)
+                    continue
 
                 if status == "waiting_human":
                     await self._notify_progress(project_id, "自动审核", 0, 0, "系统", "", "running", "全自动模式：自动通过审核门，继续生成...", 50)
@@ -589,8 +699,6 @@ class PipelineExecutor:
                         )
                         return result
 
-                await asyncio.sleep(0.3)
-
         except Exception as e:
             logger.error("流水线自动运行失败: %s", e)
             await self.state_machine.mark_failed(project_id, str(e)[:500])
@@ -598,6 +706,7 @@ class PipelineExecutor:
             return {"status": "failed", "message": str(e)}
         finally:
             self._cancelled_projects.discard(project_id)
+            self._running_locks_global.pop(project_id, None)
 
     async def _retry_from_failure(self, project_id: str) -> bool:
         """从失败状态恢复，保留已完成的步骤结果，重新执行失败步骤"""
@@ -715,13 +824,16 @@ class PipelineExecutor:
             step_progress = 0
         return min(99, int(phase_progress + step_progress))
 
-    async def _start_next_phase(self, project_id, template, state):
-        next_phase_idx = state.current_phase_index
-
+    async def _start_next_phase(self, project_id, template, _state=None):
         try:
             next_state = await self.state_machine.get_state(project_id)
         except Exception:
             return {"status": "ok", "message": "进入下一阶段"}
+
+        if not next_state:
+            return {"status": "ok", "message": "进入下一阶段"}
+
+        next_phase_idx = next_state.current_phase_index
 
         if next_phase_idx < len(template.phases):
             phase = template.phases[next_phase_idx]
@@ -842,7 +954,7 @@ class PipelineExecutor:
                 pre_parsed = data.get("world_parsed")
                 text = data.get("world_setting", "")
                 parsed = pre_parsed if isinstance(pre_parsed, dict) else self._extract_json(text)
-                if parsed:
+                if parsed and isinstance(parsed, dict):
                     cc_value = parsed.pop("core_contradiction", None)
                     await self.storage.clear_world_config(project_id)
                     await self.storage.save_world_config(project_id, parsed if isinstance(parsed, dict) else {})
@@ -878,13 +990,7 @@ class PipelineExecutor:
                 elif isinstance(parsed, dict):
                     chars = parsed.get("characters", parsed.get("角色", []))
                 if isinstance(chars, list) and len(chars) > 0:
-                    existing_chars = await self.db.execute(
-                        __import__("sqlalchemy").text("SELECT COUNT(*) as cnt FROM characters WHERE project_id = :pid"),
-                        {"pid": project_id},
-                    )
-                    char_count = int(existing_chars.scalar() or 0)
-                    if char_count == 0:
-                        await self.storage.clear_characters(project_id)
+                    await self.storage.clear_characters(project_id)
                     await self.storage.create_characters_bulk(project_id, chars)
                     await self.state_machine.update_result_data(project_id, "characters", chars)
                     await self.state_machine.update_result_data(project_id, "layer0_characters_built", True)
@@ -904,12 +1010,7 @@ class PipelineExecutor:
                 elif isinstance(parsed, dict):
                     fs_list = parsed.get("foreshadows", parsed.get("伏笔", []))
                 if isinstance(fs_list, list) and len(fs_list) > 0:
-                    fs_check = await self.db.execute(
-                        __import__("sqlalchemy").text("SELECT COUNT(*) as cnt FROM foreshadows WHERE project_id = :pid"),
-                        {"pid": project_id},
-                    )
-                    if int(fs_check.scalar() or 0) == 0:
-                        await self.storage.clear_foreshadows(project_id)
+                    await self.storage.clear_foreshadows(project_id)
                     await self.storage.create_foreshadows_bulk(project_id, fs_list)
                     await self.state_machine.update_result_data(project_id, "foreshadows", fs_list)
                     await self.state_machine.update_result_data(project_id, "layer0_foreshadows_built", True)
@@ -928,18 +1029,39 @@ class PipelineExecutor:
                     ch_list = parsed
                 elif isinstance(parsed, dict):
                     ch_list = parsed.get("chapters", parsed.get("outline", parsed.get("章节", [])))
+                    if not isinstance(ch_list, list):
+                        ch_list = None
                 if isinstance(ch_list, list) and len(ch_list) > 0:
                     await self.storage.clear_chapters(project_id)
                     await self.storage.create_chapters_bulk(project_id, ch_list)
                     await self.state_machine.update_result_data(project_id, "chapters", ch_list)
                     await self.state_machine.update_result_data(project_id, "layer3_outline_built", True)
+                    await self.state_machine.update_result_data(project_id, f"layer{state.current_phase_index}_{skill}_built", True)
                     for ch in ch_list:
                         await self._notify_data_changed(project_id, "chapter_created",
                                                          {"entity_id": ch.get("title", ch.get("标题", ""))})
                     await self._persist_chapter_sections(project_id, ch_list)
                 else:
-                    logger.warning("chapter_outliner 未生成有效章节数据")
-                    raise RuntimeError("chapter_outliner 未生成有效章节数据，无法继续流水线")
+                    logger.warning("chapter_outliner 未生成有效章节数据，尝试从原始文本提取")
+                    raw_text = str(text) if text else ""
+                    if len(raw_text) > 100:
+                        extracted = self._extract_chapters_from_text(raw_text)
+                        if extracted and len(extracted) > 0:
+                            await self.storage.clear_chapters(project_id)
+                            await self.storage.create_chapters_bulk(project_id, extracted)
+                            await self.state_machine.update_result_data(project_id, "chapters", extracted)
+                            await self.state_machine.update_result_data(project_id, "layer3_outline_built", True)
+                            await self.state_machine.update_result_data(project_id, f"layer{state.current_phase_index}_{skill}_built", True)
+                            for ch in extracted:
+                                await self._notify_data_changed(project_id, "chapter_created",
+                                                                 {"entity_id": ch.get("title", ch.get("标题", ""))})
+                            await self._persist_chapter_sections(project_id, extracted)
+                        else:
+                            logger.error("chapter_outliner 无法从原始文本提取章节数据")
+                            raise RuntimeError("chapter_outliner 未生成有效章节数据，无法继续流水线")
+                    else:
+                        logger.error("chapter_outliner 原始文本过短: %s", raw_text[:200])
+                        raise RuntimeError("chapter_outliner 未生成有效章节数据，无法继续流水线")
 
             elif skill in ("scene_writer", "component_writer", "chapter_writer", "novel_writer"):
                 await self._persist_scene_result(project_id, data, state)
@@ -952,14 +1074,46 @@ class PipelineExecutor:
                     rel_list = parsed
                 elif isinstance(parsed, dict):
                     rel_list = parsed.get("relations", parsed.get("关系", []))
+                    if not isinstance(rel_list, list):
+                        rel_list = None
                 if isinstance(rel_list, list) and len(rel_list) > 0:
+                    await self.storage.clear_relations(project_id)
                     await self.storage.create_relations_bulk(project_id, rel_list)
                     await self.state_machine.update_result_data(project_id, "relations", rel_list)
                     await self.state_machine.update_result_data(project_id, "layer0_relations_built", True)
-                    await self._notify_data_changed(project_id, "relation_created", {})
+                    await self.state_machine.update_result_data(project_id, "layer0_relation_network_designer_built", True)
+                    for rel in rel_list:
+                        if isinstance(rel, dict):
+                            a_name = rel.get("char_a_name", rel.get("char_a", ""))
+                            b_name = rel.get("char_b_name", rel.get("char_b", ""))
+                            await self._notify_data_changed(project_id, "relation_created",
+                                                             {"entity_id": f"{a_name}-{b_name}"})
                 else:
-                    logger.warning("relation_network_designer 未生成有效关系数据")
-                    raise RuntimeError("relation_network_designer 未生成有效关系数据，无法继续流水线")
+                    logger.warning("relation_network_designer 未生成有效关系数据，尝试直接从原始文本提取")
+                    raw_text = str(text) if text else ""
+                    if len(raw_text) > 50:
+                        repaired = self._repair_truncated_json(raw_text)
+                        if repaired is not None:
+                            if isinstance(repaired, list):
+                                rel_list = repaired
+                            elif isinstance(repaired, dict):
+                                rel_list = repaired.get("relations", repaired.get("关系", []))
+                            if isinstance(rel_list, list) and len(rel_list) > 0:
+                                await self.storage.clear_relations(project_id)
+                                await self.storage.create_relations_bulk(project_id, rel_list)
+                                await self.state_machine.update_result_data(project_id, "relations", rel_list)
+                                await self.state_machine.update_result_data(project_id, "layer0_relations_built", True)
+                                await self.state_machine.update_result_data(project_id, "layer0_relation_network_designer_built", True)
+                                logger.info("relation_network_designer 通过截断恢复成功保存 %d 条关系", len(rel_list))
+                            else:
+                                logger.error("relation_network_designer 截断恢复后仍无有效关系数据")
+                                raise RuntimeError("relation_network_designer 未生成有效关系数据，无法继续流水线")
+                        else:
+                            logger.error("relation_network_designer 无法修复截断JSON")
+                            raise RuntimeError("relation_network_designer 未生成有效关系数据，无法继续流水线")
+                    else:
+                        logger.error("relation_network_designer 原始文本过短: %s", raw_text[:200])
+                        raise RuntimeError("relation_network_designer 未生成有效关系数据，无法继续流水线")
 
             elif skill == "choice_designer":
                 await self._persist_choice_designer_result(project_id, data, state)
@@ -989,9 +1143,72 @@ class PipelineExecutor:
                 await self.state_machine.update_result_data(project_id, "layer5_foreshadow_audit_built", True)
                 await self._notify_data_changed(project_id, "foreshadow_recovery_audit_completed", {})
 
+            elif skill == "foreshadow_reaction":
+                reaction_data = data.get("reactions", data.get("chemical_reactions", ""))
+                if reaction_data:
+                    await self.state_machine.update_result_data(project_id, "foreshadow_reactions", reaction_data)
+                await self.state_machine.update_result_data(project_id, "layer0_foreshadow_reaction_built", True)
+                await self._notify_data_changed(project_id, "foreshadow_updated", {})
+
+            elif skill == "rag_retriever":
+                next_step = data.get("next_step", data)
+                await self.state_machine.update_result_data(project_id, "next_step", next_step)
+                await self.state_machine.update_result_data(project_id, "layer2_rag_built", True)
+
+            elif skill == "llm_audit":
+                await self.state_machine.update_result_data(project_id, "last_audit_result", data)
+                audit_key = f"layer{state.current_phase_index}_audit_built"
+                await self.state_machine.update_result_data(project_id, audit_key, True)
+                await self._notify_data_changed(project_id, "audit_completed", {
+                    "overall": data.get("overall", "unknown"),
+                    "issues_count": len(data.get("issues", [])),
+                })
+
+            elif skill == "state_updater":
+                await self.state_machine.update_result_data(project_id, "state_update", data)
+                await self.state_machine.update_result_data(project_id, "layer1_state_built", True)
+                await self._notify_data_changed(project_id, "state_updated", {
+                    "character_updates": data.get("character_updates", {}),
+                    "foreshadow_updates": data.get("foreshadow_updates", {}),
+                    "relation_updates": data.get("relation_updates", {}),
+                })
+
+            skip_flag = f"layer{state.current_phase_index}_{skill}_built"
+            if not state.result_data.get(skip_flag):
+                await self.state_machine.update_result_data(project_id, skip_flag, True)
+
         except Exception as e:
             logger.error("持久化 %s 结果失败: %s", skill, str(e))
             raise RuntimeError(f"持久化 {skill} 结果失败: {str(e)[:200]}") from e
+
+    def _extract_chapters_from_text(self, text: str) -> list[dict] | None:
+        import re
+        chapters = []
+        chapter_pattern = re.compile(
+            r'(?:第[一二三四五六七八九十百千\d]+章|Chapter\s*\d+|chapter\s*\d+)[\s：:]*([^\n]+)',
+            re.IGNORECASE
+        )
+        matches = list(chapter_pattern.finditer(text))
+        if not matches:
+            heading_pattern = re.compile(r'^#{1,3}\s+(.+)$', re.MULTILINE)
+            matches = list(heading_pattern.finditer(text))
+        if not matches:
+            return None
+        for i, match in enumerate(matches):
+            title = match.group(1).strip() if match.lastindex else f"第{i+1}章"
+            start = match.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            content = text[start:end].strip()
+            summary = content[:500] if content else ""
+            chapters.append({
+                "chapter_number": i + 1,
+                "title": title,
+                "summary": summary,
+                "emotion_target": 5,
+                "key_turning_point": "",
+                "estimated_word_count": 3000,
+            })
+        return chapters if chapters else None
 
     async def _persist_chapter_sections(self, project_id: str, chapters: list[dict]):
         try:
@@ -1191,12 +1408,18 @@ class PipelineExecutor:
 
     async def _persist_scene_result(self, project_id: str, data: dict, state):
         scene_id = data.get("scene_id")
+        scene_plan = state.result_data.get("next_step", {}) if state else {}
+        planned_chapter_id = scene_plan.get("chapter_id", "")
+        planned_scene_code = scene_plan.get("scene_code", "")
+        planned_chapter_number = scene_plan.get("chapter_number")
+        planned_scene_num = scene_plan.get("scene_num")
+
         if not scene_id:
             chapters = await self.storage.get_chapter_outlines(project_id)
             if chapters:
-                pending_scenes = await self._get_next_pending_scene(project_id, chapters)
-                if pending_scenes:
-                    scene_id = str(pending_scenes.get("id", ""))
+                pending_scene = await self._get_next_pending_scene(project_id, chapters)
+                if pending_scene:
+                    scene_id = str(pending_scene.get("id", ""))
 
         narration = data.get("narration", "")
         dialogue = data.get("dialogue", [])
@@ -1223,6 +1446,7 @@ class PipelineExecutor:
             try:
                 existing = await self.storage.get_scene(project_id, scene_id)
                 if existing:
+                    existing_scene_code = existing.get("scene_code", scene_id)
                     content = {
                         "narration": narration,
                         "dialogue": dialogue,
@@ -1254,6 +1478,8 @@ class PipelineExecutor:
                     await self._track_word_count(project_id, state, scene_id, word_count)
                     await self._notify_data_changed(project_id, "scene_updated",
                                                      {"entity_id": scene_id})
+                    await self._index_scene_to_rag(project_id, scene_id, existing_scene_code, narration, dialogue, actions, characters_involved)
+                    await self._sync_foreshadow_states(project_id, scene_id, foreshadow_ops)
                     return
             except Exception as e:
                 logger.warning("更新已有场景失败: %s, 尝试创建新场景", e)
@@ -1267,30 +1493,44 @@ class PipelineExecutor:
             cfg = await self.storage.get_project_config(project_id) or {}
             scenes_per_chapter_max = cfg.get("scenes_per_chapter_max", 6)
 
-            current_ch_idx = state.result_data.get("current_chapter_index", 0)
+            if planned_chapter_id and planned_scene_code:
+                chapter_id = planned_chapter_id
+                scene_code = planned_scene_code
+                chapter = next((ch for ch in chapters if str(ch.get("id", "")) == planned_chapter_id), None)
+                if chapter:
+                    ch_num = chapter.get("chapter_number", planned_chapter_number if planned_chapter_number else 0)
+                else:
+                    ch_num = planned_chapter_number if planned_chapter_number else 0
+                existing_scenes = await self.storage.get_scenes_by_chapter(project_id, chapter_id)
+                scene_num = len(existing_scenes) + 1
+                await self.state_machine.update_result_data(
+                    project_id, "current_chapter_index", scene_plan.get("current_chapter_index", 0)
+                )
+            else:
+                current_ch_idx = state.result_data.get("current_chapter_index", 0)
 
-            while current_ch_idx < len(chapters):
-                ch = chapters[current_ch_idx]
-                ch_id = str(ch.get("id", ""))
-                existing = await self.storage.get_scenes_by_chapter(project_id, ch_id)
-                if len(existing) < scenes_per_chapter_max:
-                    break
-                current_ch_idx += 1
+                while current_ch_idx < len(chapters):
+                    ch = chapters[current_ch_idx]
+                    ch_id = str(ch.get("id", ""))
+                    existing = await self.storage.get_scenes_by_chapter(project_id, ch_id)
+                    if len(existing) < scenes_per_chapter_max:
+                        break
+                    current_ch_idx += 1
 
-            if current_ch_idx >= len(chapters):
-                current_ch_idx = len(chapters) - 1
+                if current_ch_idx >= len(chapters):
+                    current_ch_idx = len(chapters) - 1
 
-            chapter = chapters[current_ch_idx]
-            chapter_id = str(chapter.get("id", ""))
+                chapter = chapters[current_ch_idx]
+                chapter_id = str(chapter.get("id", ""))
 
-            await self.state_machine.update_result_data(
-                project_id, "current_chapter_index", current_ch_idx
-            )
+                await self.state_machine.update_result_data(
+                    project_id, "current_chapter_index", current_ch_idx
+                )
 
-            existing_scenes = await self.storage.get_scenes_by_chapter(project_id, chapter_id)
-            scene_num = len(existing_scenes) + 1
-            ch_num = chapter.get("chapter_number", current_ch_idx + 1)
-            scene_code = f"CH{ch_num:03d}_S{scene_num:03d}"
+                existing_scenes = await self.storage.get_scenes_by_chapter(project_id, chapter_id)
+                scene_num = len(existing_scenes) + 1
+                ch_num = chapter.get("chapter_number", current_ch_idx + 1)
+                scene_code = f"CH{ch_num:03d}_S{scene_num:03d}"
 
             scene_type = data.get("scene_type", "dialogue")
             location = data.get("location", "")
@@ -1331,8 +1571,99 @@ class PipelineExecutor:
             await self._track_word_count(project_id, state, new_scene_id, word_count)
             await self._notify_data_changed(project_id, "scene_created",
                                              {"entity_id": new_scene_id})
+            await self._index_scene_to_rag(project_id, new_scene_id, scene_code, narration, dialogue, actions, characters_involved)
+            await self._sync_foreshadow_states(project_id, new_scene_id, foreshadow_ops)
         except Exception as e:
             logger.warning("创建新场景失败: %s", e)
+
+    async def _index_scene_to_rag(self, project_id: str, scene_id: str, scene_code: str,
+                                   narration: str, dialogue, actions, characters_involved):
+        try:
+            dialogue_text = ""
+            if isinstance(dialogue, list):
+                dialogue_text = "\n".join(
+                    f"{d.get('char', '?')}: {d.get('text', '')}" for d in dialogue if isinstance(d, dict)
+                )
+            elif dialogue:
+                dialogue_text = str(dialogue)
+
+            actions_text = ""
+            if isinstance(actions, list):
+                actions_text = "\n".join(str(a) for a in actions)
+            elif actions:
+                actions_text = str(actions)
+
+            chars_text = ", ".join(characters_involved) if isinstance(characters_involved, list) else ""
+
+            full_text = f"场景 {scene_code}\n{chars_text}\n{narration}\n{dialogue_text}\n{actions_text}"
+            indexer = RAGIndexer(self.db)
+            await indexer.index_content(
+                project_id=project_id,
+                content_type="scene",
+                content_id=scene_id,
+                text=full_text,
+                metadata={"scene_code": scene_code},
+            )
+        except Exception as e:
+            logger.warning("RAG索引场景 %s 失败: %s", scene_code, e)
+
+    async def _sync_foreshadow_states(self, project_id: str, scene_id: str, foreshadow_ops):
+        if not foreshadow_ops:
+            return
+        if isinstance(foreshadow_ops, str):
+            try:
+                foreshadow_ops = json.loads(foreshadow_ops)
+            except (json.JSONDecodeError, TypeError):
+                return
+        if not isinstance(foreshadow_ops, list) or not foreshadow_ops:
+            return
+        try:
+            from core.agent.state_manager import VALID_FS_TRANSITIONS, _FS_OP_TO_STATUS
+            for op in foreshadow_ops:
+                if not isinstance(op, dict):
+                    continue
+                fs_id = op.get("fs_id") or op.get("fs_code")
+                operation = op.get("op", op.get("operation", ""))
+                if not fs_id or operation not in ("plant", "reinforce", "reveal"):
+                    continue
+                current = await self.storage.get_foreshadow(project_id, str(fs_id))
+                if not current:
+                    all_fs = await self.storage.get_foreshadows(project_id)
+                    for f in all_fs:
+                        if f.get("fs_code") == str(fs_id):
+                            current = f
+                            break
+                current_status = current.get("current_status", "design") if current else "design"
+                if operation not in VALID_FS_TRANSITIONS.get(current_status, set()):
+                    logger.warning("伏笔 %s 非法状态转换: %s → %s", fs_id, current_status, operation)
+                    continue
+                new_status = _FS_OP_TO_STATUS.get(operation, operation)
+                update_data: dict[str, object] = {"current_status": new_status}
+                if operation == "reinforce" and current:
+                    old_count = current.get("reinforce_count", 0) or 0
+                    update_data["reinforce_count"] = int(old_count if isinstance(old_count, (int, float, str)) else 0) + 1
+                    reinforce_scenes = list(current.get("reinforce_scenes", []) or [])
+                    if scene_id and scene_id not in reinforce_scenes:
+                        reinforce_scenes.append(scene_id)
+                    update_data["reinforce_scenes"] = json.dumps(reinforce_scenes, ensure_ascii=False)
+                elif operation == "plant":
+                    if scene_id:
+                        update_data["plant_scene_id"] = scene_id
+                elif operation == "reveal":
+                    if scene_id:
+                        update_data["reveal_scene_id"] = scene_id
+                await self.storage.update_foreshadow_state(str(fs_id), update_data)
+                logger.info("伏笔状态同步: %s %s → %s", fs_id, current_status, new_status)
+        except Exception as e:
+            logger.warning("伏笔状态同步失败: %s", str(e))
+
+    async def _reindex_all_content(self, project_id: str):
+        try:
+            indexer = RAGIndexer(self.db)
+            await indexer.reindex_project(project_id)
+            logger.info("项目 %s 全量RAG重索引完成", project_id)
+        except Exception as e:
+            logger.warning("项目 %s RAG重索引失败: %s", project_id, e)
 
     async def _track_word_count(self, project_id: str, state, scene_id: str, count: int):
         total_words = state.result_data.get("total_written_words", 0) + count
@@ -1378,19 +1709,137 @@ class PipelineExecutor:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
+            pass
+        try:
+            start = text.find("{")
+            if start == -1:
+                start = text.find("[")
+            if start >= 0:
+                end = text.rfind("}") + 1
+                if text[start] == "[":
+                    end = text.rfind("]") + 1
+                if end > start:
+                    return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+        repaired = self._repair_truncated_json(text)
+        if repaired is not None:
+            return repaired
+        return None
+
+    def _repair_truncated_json(self, text: str) -> dict | list | None:
+        if not text:
+            return None
+        start_obj = text.find("{")
+        start_arr = text.find("[")
+        if start_obj == -1 and start_arr == -1:
+            return None
+        is_array = False
+        start = -1
+        if start_obj == -1:
+            start = start_arr
+            is_array = True
+        elif start_arr == -1:
+            start = start_obj
+        elif start_arr < start_obj:
+            start = start_arr
+            is_array = True
+        else:
+            start = start_obj
+        fragment = text[start:]
+        if is_array:
+            last_complete_obj_end = -1
+            depth = 0
+            for i, ch in enumerate(fragment):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        last_complete_obj_end = i
+            if last_complete_obj_end > 0:
+                candidate = fragment[:last_complete_obj_end + 1] + "]"
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+            open_braces = 0
+            open_brackets = 0
+            in_string = False
+            escape_next = False
+            for ch in fragment:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    open_braces += 1
+                elif ch == "}":
+                    open_braces -= 1
+                elif ch == "[":
+                    open_brackets += 1
+                elif ch == "]":
+                    open_brackets -= 1
+            closing = ""
+            if in_string:
+                closing += '"'
+            closing += "}" * max(0, open_braces) + "]" * max(0, open_brackets)
+            candidate = fragment + closing
             try:
-                start = text.find("{")
-                if start == -1:
-                    start = text.find("[")
-                if start >= 0:
-                    end = text.rfind("}") + 1
-                    if text[start] == "[":
-                        end = text.rfind("]") + 1
-                    if end > start:
-                        return json.loads(text[start:end])
+                return json.loads(candidate)
             except json.JSONDecodeError:
                 pass
-            return None
+        else:
+            open_braces = 0
+            open_brackets = 0
+            in_string = False
+            escape_next = False
+            last_complete_key_pos = -1
+            for i, ch in enumerate(fragment):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    open_braces += 1
+                elif ch == "}":
+                    open_braces -= 1
+                    if open_braces == 0:
+                        last_complete_key_pos = i
+                elif ch == "[":
+                    open_brackets += 1
+                elif ch == "]":
+                    open_brackets -= 1
+            if last_complete_key_pos > 0:
+                candidate = fragment[:last_complete_key_pos + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+            closing = ""
+            if in_string:
+                closing += '"'
+            closing += "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+            candidate = fragment + closing
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        return None
 
     def _build_payload(self, project_id: str, step: Step, state) -> dict:
         payload = {}

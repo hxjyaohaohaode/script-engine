@@ -235,6 +235,9 @@ export default function GlobalLoading({ pageType }: { pageType?: string }) {
     'emotion-curve': <SkeletonEmotionCurve />,
     export: <SkeletonExport />,
     settings: <SkeletonSettings />,
+    pipeline: <SkeletonDashboard />,
+    'script-viz': <SkeletonGeneric />,
+    'script-preview': <SkeletonGeneric />,
   }
 
   return (

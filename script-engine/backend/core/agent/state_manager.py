@@ -10,10 +10,17 @@ from core.agent.skill import Skill
 logger = logging.getLogger(__name__)
 
 VALID_FS_TRANSITIONS = {
-    "design": {"plant", "design"},
-    "plant": {"plant", "reinforce", "reveal"},
-    "reinforce": {"plant", "reinforce", "reveal"},
-    "reveal": {"reveal"},
+    "design": {"plant"},
+    "planted": {"reinforce", "reveal"},
+    "reinforced": {"reinforce", "reveal"},
+    "revealed": set(),
+    "active": {"reinforce", "reveal"},
+}
+
+_FS_OP_TO_STATUS = {
+    "plant": "planted",
+    "reinforce": "reinforced",
+    "reveal": "revealed",
 }
 
 INTERACTION_TYPE_IMPACT = {
@@ -192,8 +199,8 @@ class StateManagerAgent(BaseAgent):
     async def _build_context(self, task: AgentTask) -> dict:
         return {}
 
-    def _select_skill(self, task_type: str):
-        return self.skills.get(task_type)
+    def _select_skill(self, task_type: str) -> Skill:
+        return self.skills[task_type]
 
     async def _update_characters_from_scene(self, scene: dict, project_id: str, task: AgentTask | None = None) -> dict:
         characters_involved = scene.get("characters_involved", [])
@@ -277,7 +284,7 @@ class StateManagerAgent(BaseAgent):
 }}"""},
                     ],
                     cost_profile="economy",
-                    max_tokens=2000,
+                    max_tokens=4096,
                     temperature=0.3,
                 )
 
@@ -354,6 +361,56 @@ class StateManagerAgent(BaseAgent):
                 return json.loads(m.group(0))
             except json.JSONDecodeError:
                 pass
+        start = text.find("{")
+        if start >= 0:
+            fragment = text[start:]
+            open_braces = 0
+            open_brackets = 0
+            in_string = False
+            escape_next = False
+            for ch in fragment:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    open_braces += 1
+                elif ch == "}":
+                    open_braces -= 1
+                elif ch == "[":
+                    open_brackets += 1
+                elif ch == "]":
+                    open_brackets -= 1
+            closing = ""
+            if in_string:
+                closing += '"'
+            closing += "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+            candidate = fragment + closing
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+            last_complete = -1
+            depth = 0
+            for i, ch in enumerate(fragment):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        last_complete = i
+            if last_complete > 0:
+                try:
+                    return json.loads(fragment[:last_complete + 1])
+                except json.JSONDecodeError:
+                    pass
         return None
 
     async def _update_foreshadows_from_scene(self, scene: dict, project_id: str) -> dict:
@@ -364,23 +421,44 @@ class StateManagerAgent(BaseAgent):
             return {"updated": 0}
 
         updates = {}
+        scene_id = scene.get("id") or scene.get("scene_id", "")
         for op in foreshadow_ops:
-            fs_id = op.get("fs_id")
+            fs_id = op.get("fs_id") or op.get("fs_code")
             operation = op.get("op", op.get("operation", ""))
             if not fs_id or operation not in ("plant", "reinforce", "reveal"):
                 continue
 
             current = await self.storage.get_foreshadow(project_id, str(fs_id))
+            if not current:
+                try:
+                    all_fs = await self.storage.get_foreshadows(project_id)
+                    for f in all_fs:
+                        if f.get("fs_code") == str(fs_id):
+                            current = f
+                            break
+                except Exception:
+                    pass
             current_status = current.get("current_status", "design") if current else "design"
 
             if operation not in VALID_FS_TRANSITIONS.get(current_status, set()):
                 logger.warning("伏笔 %s 非法状态转换: %s → %s", fs_id, current_status, operation)
                 continue
 
-            update_data = {"current_status": operation}
+            new_status = _FS_OP_TO_STATUS.get(operation, operation)
+            update_data: dict[str, object] = {"current_status": new_status}
             if operation == "reinforce" and current:
                 old_count = current.get("reinforce_count", 0) or 0
-                update_data["reinforce_count"] = str(old_count + 1)
+                update_data["reinforce_count"] = int(old_count if isinstance(old_count, (int, float, str)) else 0) + 1
+                reinforce_scenes = list(current.get("reinforce_scenes", []) or [])
+                if scene_id and scene_id not in reinforce_scenes:
+                    reinforce_scenes.append(scene_id)
+                update_data["reinforce_scenes"] = json.dumps(reinforce_scenes, ensure_ascii=False)
+            elif operation == "plant":
+                if scene_id:
+                    update_data["plant_scene_id"] = scene_id
+            elif operation == "reveal":
+                if scene_id:
+                    update_data["reveal_scene_id"] = scene_id
 
             try:
                 await self.storage.update_foreshadow_state(str(fs_id), update_data)

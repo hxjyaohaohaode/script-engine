@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -20,7 +20,7 @@ class AuditRecord(Base):
     overall_result = Column(String(10), nullable=True)
     issues = Column(JSONType, default=list)
     suggestions = Column(JSONType, default=list)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="audit_records")
     scene = relationship("Scene", backref="audit_records")

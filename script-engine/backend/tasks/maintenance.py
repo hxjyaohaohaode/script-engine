@@ -1,7 +1,7 @@
 import logging
 from datetime import UTC, datetime, timedelta
 
-from . import _safe_task_decorator as task_decorator, mark_agent_task_timeout, push_progress_via_ws, update_progress
+from tasks._helpers import _safe_task_decorator as task_decorator, mark_agent_task_timeout, push_progress_via_ws, update_progress
 
 logger = logging.getLogger(__name__)
 

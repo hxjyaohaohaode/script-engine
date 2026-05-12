@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -19,7 +19,7 @@ class Element(Base):
     first_appear_scene_code = Column(String(30), nullable=True)
     last_update_scene_code = Column(String(30), nullable=True)
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="elements")
 
@@ -34,6 +34,6 @@ class InfoPoint(Base):
     importance = Column(String(10), nullable=True)
     known_by = Column(JSONType, default=list)
     planted_in_scene_code = Column(String(30), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="info_points")

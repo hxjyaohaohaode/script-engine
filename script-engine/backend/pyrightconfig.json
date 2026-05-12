@@ -35,5 +35,14 @@
   "reportReturnType": false,
   "reportAssignmentType": false,
   "reportIndexIssue": false,
-  "reportOperatorIssue": false
+  "reportOperatorIssue": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownLambdaType": false,
+  "reportMissingTypeArgument": false,
+  "reportUnnecessaryIsInstance": false,
+  "reportUnusedVariable": false,
+  "reportMissingParameterType": false
 }

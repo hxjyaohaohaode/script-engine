@@ -247,7 +247,8 @@ export default function GlobalWebSocket() {
   useEffect(() => {
     if (currentProject?.id && currentProject.id !== prevProjectIdRef.current) {
       eventBus.emit(DataEvents.PROJECT_SWITCHED, { projectId: currentProject.id })
-      queryClientRef.current.invalidateQueries()
+      queryClientRef.current.invalidateQueries({ queryKey: ['dashboard', currentProject.id] })
+      queryClientRef.current.invalidateQueries({ queryKey: ['pipeline', currentProject.id] })
     }
     prevProjectIdRef.current = currentProject?.id || null
   }, [currentProject?.id])

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -23,8 +23,8 @@ class ChoiceDesign(Base):
     hidden_condition = Column(Text, nullable=True)
     moral_alignment = Column(String(20), default="gray", server_default="gray", nullable=False)
     branch_target = Column(String(200), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), nullable=False)
 
     project = relationship("Project", backref="choice_designs")
     section = relationship("ChapterSection", backref="choice_designs")

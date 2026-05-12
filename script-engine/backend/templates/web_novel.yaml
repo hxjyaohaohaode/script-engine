@@ -1,6 +1,15 @@
 name: web_novel
 description: "网文小说生成，线性叙事，无分支。"
-scale_config: {}
+scale_config:
+  light:
+    max_parallel: 2
+    audit_skills: [llm_audit]
+  standard:
+    max_parallel: 3
+    audit_skills: [llm_audit]
+  heavy:
+    max_parallel: 5
+    audit_skills: [llm_audit]
 
 phases:
   - name: 设定
@@ -51,6 +60,6 @@ phases:
     steps:
       - agent: auditor
         skill: llm_audit
-        input_from: [layer0, layer5]
+        input_from: [layer0, layer2, layer3]
         output_to: layer2
         cost_profile: quality

@@ -228,8 +228,8 @@ export default function WorldSettings() {
   const lockedCount = Object.values(locks).filter(l => l.isLocked).length
 
   return (
-    <div style={{ fontFamily: 'var(--font-family)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+    <div style={{ fontFamily: 'var(--font-family)', height: '100%', overflow: 'auto' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexShrink: 0 }}>
         <div>
           <h2 className="section-title" style={{ fontSize: 24 }}>世界观与改编策略</h2>
           <p className="text-muted" style={{ margin: '4px 0 0' }}>
@@ -238,7 +238,7 @@ export default function WorldSettings() {
         </div>
       </div>
 
-      <div className="flex gap-4 h-[calc(100vh-220px)]">
+      <div className="flex gap-4 flex-1 min-h-0">
         <div className="w-[220px] shrink-0 bg-gray-50 dark:bg-slate-800 rounded-lg p-2 overflow-auto">
           {WORLD_CONFIGS.map(item => {
             const hasContent = content[item.key] && content[item.key].trim().length > 0
@@ -266,8 +266,8 @@ export default function WorldSettings() {
           })}
         </div>
 
-        <div className="flex-1 flex flex-col gap-3 min-w-0">
-          <div className="flex items-center justify-between">
+        <div className="flex-1 flex flex-col gap-3 min-w-0 overflow-hidden">
+          <div className="flex items-center justify-between flex-shrink-0">
             <div>
               <h2 className="text-lg font-semibold m-0">{activeConfig.label}</h2>
               <p className="text-xs text-gray-400 mt-0.5">{activeConfig.desc}</p>
@@ -303,19 +303,19 @@ export default function WorldSettings() {
           </div>
 
           {!isContentEmpty && !isLocked && (
-            <div className="text-xs text-amber-500 bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 rounded-md px-3 py-1.5">
+            <div className="text-xs text-amber-500 bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 rounded-md px-3 py-1.5 flex-shrink-0">
               ⚠ 内容已填写但未锁定，切换左侧导航前建议先锁定
             </div>
           )}
 
           {isContentEmpty && !isLocked && (
-            <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-md px-3 py-1.5">
+            <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-md px-3 py-1.5 flex-shrink-0">
               ⚠ 内容尚未填写
             </div>
           )}
 
           {proposals && proposals.key === activeKey && (
-            <Card size="small" title="AI 生成方案（点击选择）" className="border-primary-200 dark:border-primary-800">
+            <Card size="small" title="AI 生成方案（点击选择）" className="border-primary-200 dark:border-primary-800 flex-shrink-0">
               <div className="space-y-2 max-h-[240px] overflow-auto">
                 {proposals.items.map((p, i) => (
                   <div
@@ -331,7 +331,7 @@ export default function WorldSettings() {
             </Card>
           )}
 
-          <div className="flex-1">
+          <div className="flex-1 min-h-0">
             <TextArea
               value={content[activeKey] || ''}
               onChange={e => handleChange(e.target.value)}
@@ -339,7 +339,7 @@ export default function WorldSettings() {
               placeholder={`请输入${activeConfig.label}的详细设定...`}
               disabled={isLocked}
               className={`
-                h-full min-h-[300px] text-[15px] leading-relaxed resize-none
+                h-full text-[15px] leading-relaxed resize-none
                 ${isLocked ? 'bg-gray-100 dark:bg-slate-800 text-gray-500 dark:text-gray-500 cursor-not-allowed' : ''}
                 ${isContentEmpty ? 'border-red-300 dark:border-red-700' : ''}
               `}

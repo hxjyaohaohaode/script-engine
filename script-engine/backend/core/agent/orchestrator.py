@@ -2,7 +2,7 @@ import json
 import logging
 from collections import defaultdict
 
-from core.agent.base import BaseAgent, AgentTask, AgentResult
+from core.agent.base import BaseAgent, AgentTask, AgentResult, layer0_value
 from core.agent.skill import Skill
 from core.agent.registry import register_agent
 
@@ -366,9 +366,9 @@ class OrchestratorAgent(BaseAgent):
             project_info = f"""## 项目设定
 目标字数: {payload.get('target_word_count', '未设定')}
 工作模式: {payload.get('work_mode', 'standard')}
-核心矛盾: {layer0.get('core_contradiction', {}).get('value', '未设定')}
-题材: {layer0.get('genre', {}).get('value', '未设定')}
-风格: {layer0.get('style', {}).get('value', '未设定')}"""
+核心矛盾: {layer0_value(layer0, 'core_contradiction', '未设定')}
+题材: {layer0_value(layer0, 'genre', '未设定')}
+风格: {layer0_value(layer0, 'style', '未设定')}"""
             return {"project_info": project_info}
 
         elif task.task_type == "analyze_progress":

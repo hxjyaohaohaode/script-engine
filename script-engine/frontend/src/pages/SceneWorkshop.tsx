@@ -820,7 +820,7 @@ export default function SceneWorkshop() {
 
   if (!currentProject) {
     return (
-      <div>
+      <div className="h-full overflow-auto">
         <h1 className="text-2xl font-bold mb-6">场景工作台</h1>
         <Card className="text-center py-12">
           <Empty description={<span className="text-gray-400">请先创建或选择一个项目</span>} />
@@ -831,7 +831,7 @@ export default function SceneWorkshop() {
 
   if (dataLoading) {
     return (
-      <div>
+      <div className="h-full overflow-auto">
         <h1 className="text-2xl font-bold mb-6">场景工作台</h1>
         <Card className="text-center py-12">
           <Spin size="large">
@@ -844,7 +844,7 @@ export default function SceneWorkshop() {
 
   if (dataError) {
     return (
-      <div>
+      <div className="h-full overflow-auto">
         <h1 className="text-2xl font-bold mb-6">场景工作台</h1>
         <Result
           status="error"
@@ -870,7 +870,7 @@ export default function SceneWorkshop() {
 
   if (chaptersData.length === 0) {
     return (
-      <div>
+      <div className="h-full overflow-auto">
         <h1 className="text-2xl font-bold mb-6">场景工作台</h1>
         <Card className="text-center py-12">
           <Empty
@@ -1241,10 +1241,11 @@ export default function SceneWorkshop() {
               })()}
 
               <div className="flex gap-2 flex-1 min-h-0">
-                <div className="flex-1 flex flex-col gap-2 min-w-0 overflow-auto">
+                <div className="flex-1 flex flex-col gap-2 min-w-0 overflow-hidden">
                   <Card
                     size="small"
-                    className="flex-1 overflow-auto"
+                    className="flex-1 overflow-hidden"
+                    styles={{ body: { height: '100%', overflow: 'auto' } }}
                     tabProps={{ size: 'small' }}
                     tabList={[
                       { key: 'narration', tab: '场景描述' },
@@ -1257,8 +1258,8 @@ export default function SceneWorkshop() {
                   >
                     {activeTab === 'narration' && (
                       <TextArea
-                        className="min-h-[200px] text-[15px] leading-relaxed"
-                        style={{ lineHeight: 1.8 }}
+                        className="text-[15px] leading-relaxed"
+                        style={{ lineHeight: 1.8, minHeight: '100%' }}
                         value={editScene.narration}
                         onChange={e => updateField('narration', e.target.value)}
                         placeholder="输入场景描述...环境、氛围、角色状态、心理活动"

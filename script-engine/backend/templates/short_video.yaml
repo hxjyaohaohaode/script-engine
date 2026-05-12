@@ -1,6 +1,15 @@
 name: short_video
 description: "短视频脚本，单场景，强节奏。"
-scale_config: {}
+scale_config:
+  light:
+    max_parallel: 1
+    audit_skills: [llm_audit]
+  standard:
+    max_parallel: 2
+    audit_skills: [llm_audit]
+  heavy:
+    max_parallel: 3
+    audit_skills: [llm_audit]
 
 phases:
   - name: 创作

@@ -1,6 +1,6 @@
 import logging
 
-from . import _safe_task_decorator as task_decorator, update_progress, push_progress_via_ws, update_agent_task_status, complete_agent_task, fail_agent_task, mark_agent_task_retrying, run_async, get_db_async
+from tasks._helpers import _safe_task_decorator as task_decorator, update_progress, push_progress_via_ws, update_agent_task_status, complete_agent_task, fail_agent_task, mark_agent_task_retrying, run_async, get_db_async
 
 logger = logging.getLogger(__name__)
 AGENT_NAME = "伏笔Agent"

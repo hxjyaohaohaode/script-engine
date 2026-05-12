@@ -16,6 +16,7 @@ router = APIRouter()
 
 STATUS_ALIASES = {
     "plant": "planted",
+    "activate": "active",
     "reveal": "revealed",
 }
 

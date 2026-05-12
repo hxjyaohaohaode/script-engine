@@ -109,6 +109,131 @@ FULL_AUDIT_SKILL.model = "ds-reasoner"
 FULL_AUDIT_SKILL.prompt_template = "全剧审计：检查伏笔回收率、时间线自洽、结局可达性(BFS)、角色弧完成度、极端压力测试。"
 FULL_AUDIT_SKILL.output_parser = lambda text: {"audit": text}
 
+BRANCH_REACHABILITY_CHECKER_SKILL = Skill()
+BRANCH_REACHABILITY_CHECKER_SKILL.name = "branch_reachability_checker"
+BRANCH_REACHABILITY_CHECKER_SKILL.intent = "analyze.audit"
+BRANCH_REACHABILITY_CHECKER_SKILL.model = "ds-reasoner"
+BRANCH_REACHABILITY_CHECKER_SKILL.prompt_template = """你是分支可达性审计专家。请审计以下互动选择网络的分支可达性。
+
+{scene_context}
+
+审计维度：
+1. **死胡同检测**：是否存在从起点无法到达任何结局的分支？
+2. **孤立分支**：是否存在没有任何选择指向的场景？
+3. **循环路径**：是否存在无限循环的分支路径？
+4. **结局覆盖**：所有结局是否都从起点可达？
+5. **隐藏选项可达性**：隐藏选项的前置条件是否合理且可达？
+
+输出JSON:
+{{"checks": [
+    {{"name": "死胡同检测", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "孤立分支", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "循环路径", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "结局覆盖", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "隐藏选项可达性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}}
+]}}"""
+BRANCH_REACHABILITY_CHECKER_SKILL.output_parser = parse_audit_response
+
+CHOICE_VALIDITY_AUDIT_SKILL = Skill()
+CHOICE_VALIDITY_AUDIT_SKILL.name = "choice_validity_audit"
+CHOICE_VALIDITY_AUDIT_SKILL.intent = "analyze.audit"
+CHOICE_VALIDITY_AUDIT_SKILL.model = "ds-reasoner"
+CHOICE_VALIDITY_AUDIT_SKILL.prompt_template = """你是互动选择有效性审计专家。请审计以下互动选择的设计质量。
+
+{scene_context}
+
+审计维度：
+1. **道德灰度**：每个选择是否避免了简单的对/错二分？是否存在"完美答案"？
+2. **后果差异化**：不同选择的直接后果、间接后果、远期后果是否有实质区别？
+3. **信息对等**：玩家做选择时是否拥有足够但不完整的信息？
+4. **隐藏选项合理性**：隐藏选项的触发条件是否合理？是否过于晦涩或过于明显？
+5. **选择权重**：是否存在明显优于其他选项的"最优解"？
+
+输出JSON:
+{{"checks": [
+    {{"name": "道德灰度", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "后果差异化", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "信息对等", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "隐藏选项合理性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "选择权重", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}}
+]}}"""
+CHOICE_VALIDITY_AUDIT_SKILL.output_parser = parse_audit_response
+
+BRANCH_REACHABILITY_AUDIT_SKILL = Skill()
+BRANCH_REACHABILITY_AUDIT_SKILL.name = "branch_reachability_audit"
+BRANCH_REACHABILITY_AUDIT_SKILL.intent = "analyze.audit"
+BRANCH_REACHABILITY_AUDIT_SKILL.model = "ds-reasoner"
+BRANCH_REACHABILITY_AUDIT_SKILL.prompt_template = """你是分支结构审计专家。请审计以下互动影游的分支结构完整性。
+
+{scene_context}
+
+审计维度：
+1. **分支深度**：最深分支路径是否超过设计上限？
+2. **分支对称性**：主要分支的叙事丰富度是否均衡？
+3. **汇聚点设计**：不同分支是否在关键节点合理汇聚？
+4. **回溯可行性**：玩家是否能在不丢失进度的前提下探索其他分支？
+5. **叙事经济性**：是否存在叙事价值不足的冗余分支？
+
+输出JSON:
+{{"checks": [
+    {{"name": "分支深度", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "分支对称性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "汇聚点设计", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "回溯可行性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "叙事经济性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}}
+]}}"""
+BRANCH_REACHABILITY_AUDIT_SKILL.output_parser = parse_audit_response
+
+CONSEQUENCE_CONSISTENCY_AUDIT_SKILL = Skill()
+CONSEQUENCE_CONSISTENCY_AUDIT_SKILL.name = "consequence_consistency_audit"
+CONSEQUENCE_CONSISTENCY_AUDIT_SKILL.intent = "analyze.audit"
+CONSEQUENCE_CONSISTENCY_AUDIT_SKILL.model = "ds-reasoner"
+CONSEQUENCE_CONSISTENCY_AUDIT_SKILL.prompt_template = """你是后果一致性审计专家。请审计互动选择的后果链是否自洽。
+
+{scene_context}
+
+审计维度：
+1. **直接后果兑现**：选择描述中承诺的直接后果是否在后续场景中兑现？
+2. **间接后果逻辑**：间接后果是否从直接后果合理推导？
+3. **远期后果伏笔**：远期后果是否在早期有足够的伏笔铺垫？
+4. **跨分支一致性**：同一事件在不同分支中的描述是否矛盾？
+5. **道德标签一致性**：选择的moral_alignment与实际后果是否匹配？
+
+输出JSON:
+{{"checks": [
+    {{"name": "直接后果兑现", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "间接后果逻辑", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "远期后果伏笔", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "跨分支一致性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "道德标签一致性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}}
+]}}"""
+CONSEQUENCE_CONSISTENCY_AUDIT_SKILL.output_parser = parse_audit_response
+
+FORESHADOW_RECOVERY_AUDIT_SKILL = Skill()
+FORESHADOW_RECOVERY_AUDIT_SKILL.name = "foreshadow_recovery_audit"
+FORESHADOW_RECOVERY_AUDIT_SKILL.intent = "analyze.audit"
+FORESHADOW_RECOVERY_AUDIT_SKILL.model = "ds-reasoner"
+FORESHADOW_RECOVERY_AUDIT_SKILL.prompt_template = """你是伏笔回收审计专家。请审计伏笔网络的回收完整性。
+
+{scene_context}
+
+审计维度：
+1. **回收率检查**：核心伏笔（全剧级+章节级）的回收率是否≥80%？
+2. **强化频率**：全剧级伏笔是否有3-5次强化？章节级伏笔是否有1-3次强化？
+3. **回收时机**：伏笔是否在合适的位置回收（不过早也不过晚）？
+4. **三层含义兑现**：每条伏笔的表面层/深层层/真相层是否都在回收时得到兑现？
+5. **伏笔网络完整性**：伏笔之间的关联（DEPENDS_ON/SUPPORTS/ENABLES/CONFLICTS_WITH）是否都得到体现？
+
+输出JSON:
+{{"checks": [
+    {{"name": "回收率检查", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "强化频率", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "回收时机", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "三层含义兑现", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}},
+    {{"name": "伏笔网络完整性", "result": "pass"|"fail", "detail": "...", "suggestion": "..."}}
+]}}"""
+FORESHADOW_RECOVERY_AUDIT_SKILL.output_parser = parse_audit_response
+
 
 @register_agent
 class AuditorAgent(BaseAgent):
@@ -118,11 +243,11 @@ class AuditorAgent(BaseAgent):
         "llm_audit": AUDIT_SKILL,
         "creative_score": CREATIVE_SCORE_SKILL,
         "full_audit": FULL_AUDIT_SKILL,
-        "branch_reachability_checker": AUDIT_SKILL,
-        "choice_validity_audit": AUDIT_SKILL,
-        "branch_reachability_audit": AUDIT_SKILL,
-        "consequence_consistency_audit": AUDIT_SKILL,
-        "foreshadow_recovery_audit": AUDIT_SKILL,
+        "branch_reachability_checker": BRANCH_REACHABILITY_CHECKER_SKILL,
+        "choice_validity_audit": CHOICE_VALIDITY_AUDIT_SKILL,
+        "branch_reachability_audit": BRANCH_REACHABILITY_AUDIT_SKILL,
+        "consequence_consistency_audit": CONSEQUENCE_CONSISTENCY_AUDIT_SKILL,
+        "foreshadow_recovery_audit": FORESHADOW_RECOVERY_AUDIT_SKILL,
     }
 
     async def execute(self, task: AgentTask) -> AgentResult:

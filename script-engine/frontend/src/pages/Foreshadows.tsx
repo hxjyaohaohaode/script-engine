@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Card, Button, Tag, Table, App, Space, Progress,
@@ -139,10 +139,14 @@ export default function Foreshadows() {
   const [relEditType, setRelEditType] = useState('enables')
 
   const svgRef = useRef<SVGSVGElement>(null)
+  const hasAutoZoomed = useRef(false)
+  const tooltipRef = useRef<d3.Selection<HTMLDivElement, unknown, HTMLElement, any> | null>(null)
 
   const { progress: aiProgress, status: aiStatus } = useTaskProgress(aiGenerateTaskId)
 
-  const fetchData = async () => {
+  const abortRef = useRef<AbortController | null>(null)
+
+  const fetchData = async (signal?: AbortSignal) => {
     if (!projectId) {
       setForeshadows([])
       setRelations([])
@@ -155,36 +159,49 @@ export default function Foreshadows() {
         foreshadowsApi.list(projectId, {
           ...(typeFilter !== 'all' ? { fs_type: typeFilter } : {}),
           ...(statusFilter !== 'all' ? { current_status: statusFilter } : {}),
-        }),
-        foreshadowsApi.listRelations(projectId),
+        }, signal),
+        foreshadowsApi.listRelations(projectId, signal),
       ])
+      if (signal?.aborted) return
       setForeshadows(fsList.map(mapFS))
       setRelations(relList.map(mapRel))
     } catch (e: any) {
+      if (signal?.aborted || e?.name === 'AbortError' || e?.detail === '请求已取消') return
       notification.error({ message: '加载伏笔数据失败', description: e?.detail || e?.message || '未知错误', placement: 'topRight' })
     }
-    setLoading(false)
+    if (!signal?.aborted) setLoading(false)
   }
 
+  const refreshData = useCallback(() => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    return fetchData(ctrl.signal)
+  }, [projectId, typeFilter, statusFilter])
+
   useEffect(() => {
-    fetchData()
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    fetchData(ctrl.signal)
+    return () => { ctrl.abort() }
   }, [projectId, typeFilter, statusFilter])
 
   useEffect(() => {
     const unsubs = [
-      eventBus.on(DataEvents.SCENE_UPDATED, () => { fetchData() }),
-      eventBus.on(DataEvents.CHAPTER_UPDATED, () => { fetchData() }),
-      eventBus.on(DataEvents.CHARACTER_UPDATED, () => { fetchData() }),
-      eventBus.on(DataEvents.PROJECT_SWITCHED, () => { fetchData() }),
+      eventBus.on(DataEvents.SCENE_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.CHAPTER_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.CHARACTER_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.PROJECT_SWITCHED, () => { refreshData() }),
     ]
     return () => unsubs.forEach(u => u())
-  }, [projectId, typeFilter, statusFilter])
+  }, [refreshData])
 
   useEffect(() => {
     if (aiStatus === 'completed') {
       setAiGenerateTaskId(null)
       notification.success({ message: 'AI伏笔体系设计完成', placement: 'topRight' })
-      fetchData()
+      refreshData()
     }
     if (aiStatus === 'failed') {
       setAiGenerateTaskId(null)
@@ -223,6 +240,11 @@ export default function Foreshadows() {
     const svgEl = svgRef.current
     const svg = d3.select(svgEl)
     svg.selectAll('*').remove()
+    if (tooltipRef.current) {
+      tooltipRef.current.remove()
+      tooltipRef.current = null
+    }
+    hasAutoZoomed.current = false
 
     const container = svgEl.parentElement
     const width = container?.clientWidth || svgEl.clientWidth || 800
@@ -335,7 +357,7 @@ export default function Foreshadows() {
         if (selectedFsData.plant_location) {
           sceneLocations.push({ label: '埋设', loc: selectedFsData.plant_location, tag: 'plant' })
         }
-        (selectedFsData.reinforce_locations || []).forEach((loc, i) => {
+        ;(selectedFsData.reinforce_locations || []).forEach((loc, i) => {
           sceneLocations.push({ label: `强化${i + 1}`, loc, tag: 'reinforce' })
         })
         if (selectedFsData.reveal_location) {
@@ -391,20 +413,20 @@ export default function Foreshadows() {
 
     const nodeCount = nodesData.length
     const area = width * height
-    const idealAreaPerNode = Math.max(4000, area / nodeCount)
-    const idealDist = Math.sqrt(idealAreaPerNode) * 0.8
+    const idealAreaPerNode = Math.max(5000, area / nodeCount)
+    const idealDist = Math.sqrt(idealAreaPerNode) * 0.85
 
     const sim = d3.forceSimulation(nodesData)
       .force('link', d3.forceLink(allLinks).id((d: any) => d.id).distance((d: any) => {
-        if (d.linkCategory === 'arc') return 80
-        return Math.min(idealDist, 120)
+        if (d.linkCategory === 'arc') return 90
+        return Math.min(idealDist, 140)
       }).strength((d: any) => {
-        if (d.linkCategory === 'arc') return 0.8
+        if (d.linkCategory === 'arc') return 0.7
         return 0.5
       }))
-      .force('charge', d3.forceManyBody().strength(-Math.min(idealDist * 2, 300)))
-      .force('center', d3.forceCenter(width / 2, height / 2).strength(0.08))
-      .force('collision', d3.forceCollide().radius((d: any) => getNodeRadius(d) + 20))
+      .force('charge', d3.forceManyBody().strength(-Math.min(idealDist * 2.2, 400)))
+      .force('center', d3.forceCenter(width / 2, height / 2).strength(0.07))
+      .force('collision', d3.forceCollide().radius((d: any) => getNodeRadius(d) + 18))
       .force('x', d3.forceX(width / 2).strength(0.05))
       .force('y', d3.forceY(height / 2).strength(0.05))
       .alphaDecay(0.02)
@@ -417,13 +439,16 @@ export default function Foreshadows() {
       defs.append('marker')
         .attr('id', `arrow-${type}`)
         .attr('viewBox', '0 -5 10 10')
-        .attr('refX', 25)
+        .attr('refX', (d: any) => {
+          // Dynamic refX based on target radius will be handled in tick
+          return 20
+        })
         .attr('refY', 0)
-        .attr('markerWidth', 8)
-        .attr('markerHeight', 8)
+        .attr('markerWidth', 7)
+        .attr('markerHeight', 7)
         .attr('orient', 'auto')
         .append('path')
-        .attr('d', 'M0,-5L10,0L0,5')
+        .attr('d', 'M0,-4L9,0L0,4')
         .attr('fill', color)
     })
 
@@ -436,7 +461,7 @@ export default function Foreshadows() {
       defs.append('marker')
         .attr('id', `arrow-${at.type}`)
         .attr('viewBox', '0 -5 10 10')
-        .attr('refX', 20)
+        .attr('refX', 18)
         .attr('refY', 0)
         .attr('markerWidth', 6)
         .attr('markerHeight', 6)
@@ -460,12 +485,12 @@ export default function Foreshadows() {
         }
         return d.type === 'conflicts' ? '#ef4444' : d.type === 'depends_on' ? '#f59e0b' : d.type === 'enables' ? '#3b82f6' : '#10b981'
       })
-      .attr('stroke-width', (d: any) => d.linkCategory === 'arc' ? 2 : 2.5)
+      .attr('stroke-width', (d: any) => d.linkCategory === 'arc' ? 1.5 : 2)
       .attr('stroke-dasharray', (d: any) => {
-        if (d.linkCategory === 'arc') return '8,4'
-        return d.type === 'depends_on' ? '6,4' : d.type === 'conflicts' ? '4,4' : 'none'
+        if (d.linkCategory === 'arc') return '6,3'
+        return d.type === 'depends_on' ? '5,3' : d.type === 'conflicts' ? '3,3' : 'none'
       })
-      .attr('stroke-opacity', (d: any) => d.linkCategory === 'arc' ? 0.7 : 0.85)
+      .attr('stroke-opacity', (d: any) => d.linkCategory === 'arc' ? 0.6 : 0.8)
       .attr('marker-end', (d: any) => `url(#arrow-${d.type})`)
 
     const nodeSelection = g.append('g').attr('class', 'nodes')
@@ -486,17 +511,41 @@ export default function Foreshadows() {
       })
       .style('cursor', (d: any) => d.nodeCategory === 'foreshadow' ? 'pointer' : 'default')
 
+    // Node circles with ring for foreshadows
     nodeSelection.append('circle')
       .attr('r', (d: any) => getNodeRadius(d))
       .attr('fill', (d: any) => getNodeFill(d))
       .attr('stroke', (d: any) => {
-        if (d.nodeCategory !== 'foreshadow') return 'rgba(255,255,255,0.8)'
-        return d.health === 'danger' ? '#fff' : 'rgba(255,255,255,0.9)'
+        if (d.nodeCategory !== 'foreshadow') return 'rgba(255,255,255,0.9)'
+        return TYPE_COLORS[d.fsType] || '#6b7280'
       })
-      .attr('stroke-width', (d: any) => {
-        if (d.nodeCategory !== 'foreshadow') return 2
-        return d.health === 'danger' ? 3 : 2
+      .attr('stroke-width', (d: any) => d.nodeCategory === 'foreshadow' ? 3 : 2)
+      .attr('opacity', 0.95)
+
+    // Inner white circle for foreshadows to create ring effect
+    nodeSelection.filter((d: any) => d.nodeCategory === 'foreshadow')
+      .append('circle')
+      .attr('r', (d: any) => getNodeRadius(d) - 4)
+      .attr('fill', (d: any) => {
+        if (d.health === 'danger') return '#fef2f2'
+        if (d.health === 'warning') return '#fffbeb'
+        return '#f0fdf4'
       })
+      .attr('pointer-events', 'none')
+
+    // Type icon inside foreshadow nodes
+    nodeSelection.filter((d: any) => d.nodeCategory === 'foreshadow')
+      .append('text')
+      .text((d: any) => {
+        const icons: Record<string, string> = { global: '★', chapter: '◆', scene: '●', interactive: '▲' }
+        return icons[d.fsType] || '●'
+      })
+      .attr('text-anchor', 'middle')
+      .attr('dy', 1)
+      .style('font-size', '10px')
+      .style('font-weight', 'bold')
+      .style('fill', (d: any) => TYPE_COLORS[d.fsType] || '#6b7280')
+      .style('pointer-events', 'none')
 
     nodeSelection.filter((d: any) => d.nodeCategory === 'worldview')
       .append('text')
@@ -522,6 +571,7 @@ export default function Foreshadows() {
       .style('font-size', '10px')
       .style('pointer-events', 'none')
 
+    // Connection count badge
     nodeSelection.filter((d: any) => d.nodeCategory === 'foreshadow' && (d.connectionCount || 0) > 0)
       .append('circle')
       .attr('r', 7)
@@ -542,11 +592,12 @@ export default function Foreshadows() {
       .style('font-weight', 'bold')
       .style('pointer-events', 'none')
 
+    // Labels
     nodeSelection.filter((d: any) => d.nodeCategory === 'foreshadow')
       .append('text')
       .text((d: any) => d.fs_code)
       .attr('text-anchor', 'middle')
-      .attr('dy', (d: any) => getNodeRadius(d) + 16)
+      .attr('dy', (d: any) => getNodeRadius(d) + 14)
       .attr('fill', '#374151')
       .style('font-size', '11px')
       .style('font-weight', '600')
@@ -554,9 +605,12 @@ export default function Foreshadows() {
 
     nodeSelection.filter((d: any) => d.nodeCategory === 'foreshadow')
       .append('text')
-      .text((d: any) => d.name.length > 8 ? d.name.slice(0, 8) + '...' : d.name)
+      .text((d: any) => {
+        const name = d.name || ''
+        return name.length > 8 ? name.slice(0, 8) + '...' : name
+      })
       .attr('text-anchor', 'middle')
-      .attr('dy', (d: any) => getNodeRadius(d) + 30)
+      .attr('dy', (d: any) => getNodeRadius(d) + 28)
       .attr('fill', '#6b7280')
       .style('font-size', '9px')
       .style('pointer-events', 'none')
@@ -564,8 +618,9 @@ export default function Foreshadows() {
     nodeSelection.filter((d: any) => d.nodeCategory !== 'foreshadow')
       .append('text')
       .text((d: any) => {
+        const name = d.name || ''
         const maxLen = d.nodeCategory === 'worldview' ? 10 : 6
-        return d.name.length > maxLen ? d.name.slice(0, maxLen) + '...' : d.name
+        return name.length > maxLen ? name.slice(0, maxLen) + '...' : name
       })
       .attr('text-anchor', 'middle')
       .attr('dy', (d: any) => getNodeRadius(d) + 14)
@@ -578,6 +633,44 @@ export default function Foreshadows() {
       .style('font-weight', '500')
       .style('pointer-events', 'none')
 
+    // Tooltip
+    const tooltip = d3.select('body').append('div')
+      .attr('class', 'fs-graph-tooltip')
+      .style('position', 'absolute')
+      .style('visibility', 'hidden')
+      .style('background', 'rgba(17,24,39,0.95)')
+      .style('color', '#fff')
+      .style('padding', '10px 14px')
+      .style('border-radius', '8px')
+      .style('font-size', '12px')
+      .style('pointer-events', 'none')
+      .style('z-index', '1000')
+      .style('max-width', '240px')
+      .style('line-height', '1.5')
+      .style('box-shadow', '0 4px 12px rgba(0,0,0,0.2)')
+    tooltipRef.current = tooltip
+
+    nodeSelection.filter((d: any) => d.nodeCategory === 'foreshadow')
+      .on('mouseenter', (e: any, d: any) => {
+        const fs = foreshadows.find(f => f.id === d.id)
+        const healthText = d.health === 'normal' ? '正常' : d.health === 'warning' ? '警告' : '危险'
+        const healthColor = d.health === 'normal' ? '#86efac' : d.health === 'warning' ? '#fcd34d' : '#fca5a5'
+        const html = `<div style="font-weight:700;margin-bottom:6px;font-size:13px;">${d.fs_code} · ${d.name}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <span style="background:${TYPE_COLORS[d.fsType]}22;color:${TYPE_COLORS[d.fsType]};padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;">${TYPE_LABELS[d.fsType] || d.fsType}</span>
+            <span style="background:${healthColor}22;color:${healthColor};padding:1px 6px;border-radius:4px;font-size:10px;font-weight:600;">${healthText}</span>
+            <span style="background:rgba(255,255,255,0.1);padding:1px 6px;border-radius:4px;font-size:10px;">${STATUS_LABELS[d.status] || d.status}</span>
+          </div>
+          ${fs?.surface_layer ? `<div style="border-top:1px solid rgba(255,255,255,0.15);padding-top:6px;font-size:11px;color:#d1d5db;">${fs.surface_layer.slice(0, 50)}${fs.surface_layer.length > 50 ? '...' : ''}</div>` : ''}`
+        tooltip.html(html).style('visibility', 'visible')
+      })
+      .on('mousemove', (e: any) => {
+        tooltip.style('left', (e.pageX + 12) + 'px').style('top', (e.pageY + 12) + 'px')
+      })
+      .on('mouseleave', () => {
+        tooltip.style('visibility', 'hidden')
+      })
+
     sim.on('tick', () => {
       nodesData.forEach((d: any) => {
         const r = getNodeRadius(d) + 15
@@ -588,32 +681,53 @@ export default function Foreshadows() {
       linkSelection
         .attr('x1', (d: any) => d.source.x)
         .attr('y1', (d: any) => d.source.y)
-        .attr('x2', (d: any) => d.target.x)
-        .attr('y2', (d: any) => d.target.y)
+        .attr('x2', (d: any) => {
+          const r = getNodeRadius(d.target) + 6
+          const dx = d.source.x - d.target.x
+          const dy = d.source.y - d.target.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+          return d.target.x + (dx / dist) * r
+        })
+        .attr('y2', (d: any) => {
+          const r = getNodeRadius(d.target) + 6
+          const dx = d.source.x - d.target.x
+          const dy = d.source.y - d.target.y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+          return d.target.y + (dy / dist) * r
+        })
 
       nodeSelection.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
     })
 
     sim.on('end', () => {
-      const nodePositions = nodesData.map((d: any) => ({ x: d.x, y: d.y, r: getNodeRadius(d) }))
-      const minX = nodePositions.map((p: any) => p.x - p.r).reduce((a: number, b: number) => Math.min(a, b), Infinity)
-      const maxX = nodePositions.map((p: any) => p.x + p.r).reduce((a: number, b: number) => Math.max(a, b), -Infinity)
-      const minY = nodePositions.map((p: any) => p.y - p.r).reduce((a: number, b: number) => Math.min(a, b), Infinity)
-      const maxY = nodePositions.map((p: any) => p.y + p.r).reduce((a: number, b: number) => Math.max(a, b), -Infinity)
+      if (hasAutoZoomed.current) return
+      hasAutoZoomed.current = true
 
-      const graphWidth = maxX - minX
-      const graphHeight = maxY - minY
-      const scale = Math.min((width - 40) / graphWidth, (height - 40) / graphHeight, 1.2)
-      const translateX = (width - graphWidth * scale) / 2 - minX * scale
-      const translateY = (height - graphHeight * scale) / 2 - minY * scale
+      const bounds = g.node()?.getBBox()
+      if (!bounds || bounds.width === 0 || bounds.height === 0) return
 
-      svg.transition().duration(500).call(
+      const padding = 40
+      const scale = Math.min(
+        (width - padding * 2) / bounds.width,
+        (height - padding * 2) / bounds.height,
+        1.2
+      )
+      const translateX = (width - bounds.width * scale) / 2 - bounds.x * scale
+      const translateY = (height - bounds.height * scale) / 2 - bounds.y * scale
+
+      svg.transition().duration(600).call(
         zoomBehavior.transform as any,
         d3.zoomIdentity.translate(translateX, translateY).scale(scale)
       )
     })
 
-    return () => { sim.stop() }
+    return () => {
+      sim.stop()
+      if (tooltipRef.current) {
+        tooltipRef.current.remove()
+        tooltipRef.current = null
+      }
+    }
   }, [foreshadows, relations, loading, graphSearch, selectedFS, arcMode])
 
   // ======== Handlers ========
@@ -775,7 +889,7 @@ export default function Foreshadows() {
   const isAiGenerating = aiGenerating && aiGenerateTaskId
 
   return (
-      <div style={{ fontFamily: 'var(--font-family)', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)' }}>
+      <div style={{ fontFamily: 'var(--font-family)', display: 'flex', flexDirection: 'column', height: '100%' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexShrink: 0 }}>
           <div>
             <h2 className="section-title" style={{ fontSize: 24 }}>选项后果</h2>
@@ -858,7 +972,7 @@ export default function Foreshadows() {
             )}
           </div>
         </div>
-      } styles={{ body: { padding: 0, height: 'calc(100vh - 420px)', minHeight: 300 } }} className="flex-1 min-h-0">
+      } styles={{ body: { padding: 0, minHeight: 300 } }} className="flex-1 min-h-0">
         {loading ? (
           <div className="h-full w-full flex items-center justify-center">
             <Spin><div className="py-12 text-gray-400">加载图谱数据...</div></Spin>
@@ -874,16 +988,16 @@ export default function Foreshadows() {
       </Card>
 
       {/* ======== 下半部分 ======== */}
-      <div className="flex gap-3 flex-1 min-h-0" style={{ maxHeight: '45%' }}>
+      <div className="flex gap-3 flex-1 min-h-0">
         {/* 左侧表格 */}
-        <Card size="small" className="flex-1 min-w-0" title={<span className="text-sm font-semibold">伏笔列表 ({filteredFS.length})</span>}>
+        <Card size="small" className="flex-1 min-w-0 flex flex-col" title={<span className="text-sm font-semibold">伏笔列表 ({filteredFS.length})</span>}>
           <Table<ForeshadowData>
             dataSource={filteredFS}
             rowKey="id"
             size="small"
             loading={loading}
             pagination={false}
-            scroll={{ y: 'calc(100vh - 580px)' }}
+            scroll={{ y: 'calc(50vh - 200px)' }}
             onRow={(r) => ({ onClick: () => setSelectedFS(r), className: selectedFS?.id === r.id ? 'bg-primary-50 dark:bg-primary-900/10' : '' })}
             columns={[
               { title: '编号', dataIndex: 'fs_code', width: 120, render: v => <Tag className="text-xs font-mono">{v}</Tag> },
@@ -913,8 +1027,7 @@ export default function Foreshadows() {
         </Card>
 
         {/* 右侧详情 */}
-        <Card size="small" className="w-[420px] shrink-0 overflow-auto" title={null}
-          style={{ maxHeight: 'calc(100vh - 500px)' }}>
+        <Card size="small" className="w-[420px] shrink-0 overflow-auto" title={null}>
           {selectedFS ? (
             <div>
               <div className="flex items-center justify-between mb-3">

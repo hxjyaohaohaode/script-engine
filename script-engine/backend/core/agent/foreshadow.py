@@ -9,7 +9,7 @@ Skills:
 import json
 import logging
 
-from core.agent.base import BaseAgent, AgentTask, AgentResult
+from core.agent.base import BaseAgent, AgentTask, AgentResult, layer0_value
 from core.agent.skill import Skill
 from core.agent.registry import register_agent
 from services.llm_prompts import build_foreshadow_design_prompt
@@ -90,8 +90,8 @@ class ForeshadowAgent(BaseAgent):
         if not chapters:
             chapters = payload.get("chapters", [])
 
-        core_truth = layer0.get("core_truth", {}).get("value", payload.get("core_truth", ""))
-        core_contradiction = layer0.get("core_contradiction", {}).get("value", payload.get("core_contradiction", ""))
+        core_truth = layer0_value(layer0, "core_truth") or payload.get("core_truth", "")
+        core_contradiction = layer0_value(layer0, "core_contradiction") or payload.get("core_contradiction", "")
         chapter_count = len(chapters) if chapters else payload.get("chapter_count", 20)
 
         world_settings = {}

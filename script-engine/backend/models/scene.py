@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 
@@ -35,9 +35,10 @@ class Scene(Base):
     audit_reports = Column(JSONType, default=list, server_default="[]", nullable=False)
     human_reviewed = Column(Boolean, default=False, server_default="0", nullable=False)
     human_feedback = Column(Text, nullable=True)
+    suggestions = Column(JSONType, default=list, server_default="[]", nullable=False)
     git_commit_hash = Column(String(40), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), nullable=False)
 
     project = relationship("Project", backref="scenes")
     chapter = relationship("Chapter", back_populates="scenes")
@@ -53,6 +54,6 @@ class SceneVersion(Base):
     content = Column(JSONType, nullable=False)
     audit_report = Column(JSONType, nullable=True)
     change_reason = Column(String(200), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     scene = relationship("Scene", back_populates="versions")

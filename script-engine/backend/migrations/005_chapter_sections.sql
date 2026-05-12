@@ -1,3 +1,11 @@
+-- ============================================================
+-- 第五轮: 章节分段表
+-- 注意: JSON 字段使用 TEXT 类型以兼容 SQLite。
+-- PostgreSQL 环境下，建议使用 JSONB 类型替代 TEXT。
+-- 生产环境推荐通过 init_db() (SQLAlchemy create_all) 建表，
+-- 会自动使用 JSONB。
+-- ============================================================
+
 CREATE TABLE IF NOT EXISTS chapter_sections (
     id VARCHAR(36) PRIMARY KEY,
     project_id VARCHAR(36) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

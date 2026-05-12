@@ -26,7 +26,7 @@ class Skill:
     name: str
     intent: str
     prompt_template: str
-    output_parser: Callable
+    output_parser: Callable[[str], dict]
     model: Optional[str] = None
 
     async def execute(

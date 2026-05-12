@@ -112,16 +112,17 @@ export default function Characters() {
   const [arcDrawerOpen, setArcDrawerOpen] = useState(false)
   const [graphScaling, setGraphScaling] = useState(d3.zoomIdentity)
   const svgRef = useRef<SVGSVGElement>(null)
-  const fetchDataRef = useRef<() => Promise<void>>(async () => {})
+  const abortRef = useRef<AbortController | null>(null)
 
-  const fetchData = async () => {
+  const fetchData = async (signal?: AbortSignal) => {
     if (!currentProject?.id) return
     setLoading(true)
     try {
       const [chars, rels] = await Promise.all([
-        charactersApi.list(currentProject.id),
-        relationsApi.list(currentProject.id),
+        charactersApi.list(currentProject.id, undefined, signal),
+        relationsApi.list(currentProject.id, signal),
       ])
+      if (signal?.aborted) { setLoading(false); return }
       setCharacters(chars.map(apiCharToCharData))
       setRelations(rels.map(r => ({
         id: r.id, char_a_id: r.char_a_id, char_b_id: r.char_b_id,
@@ -135,28 +136,41 @@ export default function Characters() {
         arc_milestones: r.arc_milestones || [],
       })))
     } catch (e: any) {
+      if (signal?.aborted || e?.name === 'AbortError') { setLoading(false); return }
       notification.error({ message: '加载角色数据失败', description: e?.detail || e?.message, placement: 'topRight' })
     }
     setLoading(false)
   }
-  fetchDataRef.current = fetchData
 
-  useEffect(() => { fetchData() }, [currentProject?.id])
+  const refreshData = useCallback(() => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    return fetchData(ctrl.signal)
+  }, [currentProject?.id])
+
+  useEffect(() => {
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    fetchData(ctrl.signal)
+    return () => { ctrl.abort() }
+  }, [currentProject?.id])
 
   useEffect(() => {
     const unsubs = [
-      eventBus.on(DataEvents.SCENE_UPDATED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.CHAPTER_UPDATED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.PROJECT_SWITCHED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.CHARACTER_CREATED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.CHARACTER_UPDATED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.CHARACTER_DELETED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.RELATION_CREATED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.RELATION_UPDATED, () => { fetchDataRef.current() }),
-      eventBus.on(DataEvents.RELATION_DELETED, () => { fetchDataRef.current() }),
+      eventBus.on(DataEvents.SCENE_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.CHAPTER_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.PROJECT_SWITCHED, () => { refreshData() }),
+      eventBus.on(DataEvents.CHARACTER_CREATED, () => { refreshData() }),
+      eventBus.on(DataEvents.CHARACTER_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.CHARACTER_DELETED, () => { refreshData() }),
+      eventBus.on(DataEvents.RELATION_CREATED, () => { refreshData() }),
+      eventBus.on(DataEvents.RELATION_UPDATED, () => { refreshData() }),
+      eventBus.on(DataEvents.RELATION_DELETED, () => { refreshData() }),
     ]
     return () => unsubs.forEach(u => u())
-  }, [currentProject?.id])
+  }, [refreshData])
 
   const charRelations = useMemo(() => {
     if (!selectedChar) return []
@@ -262,11 +276,41 @@ export default function Characters() {
 
             if (relNetRes.relations && relNetRes.relations.length > 0) {
               const allChars = [...characters, ...created]
-              const nameToId = new Map(allChars.map(c => [c.name, c.id]))
+              const nameToId = new Map<string, string>()
+              allChars.forEach(c => {
+                if (c.name) {
+                  nameToId.set(c.name, c.id)
+                  nameToId.set(c.name.toLowerCase(), c.id)
+                  nameToId.set(c.name.replace(/\s+/g, ''), c.id)
+                  nameToId.set(c.name.replace(/\s+/g, '').toLowerCase(), c.id)
+                }
+                if (c.char_code) {
+                  nameToId.set(c.char_code, c.id)
+                }
+              })
 
+              const resolveCharId = (raw: string | undefined): string | undefined => {
+                if (!raw) return undefined
+                const key = String(raw).trim()
+                if (nameToId.has(key)) return nameToId.get(key)
+                const lower = key.toLowerCase()
+                if (nameToId.has(lower)) return nameToId.get(lower)
+                const normalized = key.replace(/\s+/g, '')
+                if (nameToId.has(normalized)) return nameToId.get(normalized)
+                const normalizedLower = normalized.toLowerCase()
+                if (nameToId.has(normalizedLower)) return nameToId.get(normalizedLower)
+                for (const [mapKey, mapId] of nameToId) {
+                  if (mapKey.toLowerCase().includes(lower) || lower.includes(mapKey.toLowerCase())) {
+                    return mapId
+                  }
+                }
+                return undefined
+              }
+
+              let createdRels = 0
               for (const rel of relNetRes.relations) {
-                const aId = nameToId.get(rel.char_a_name)
-                const bId = nameToId.get(rel.char_b_name)
+                const aId = resolveCharId(rel.char_a_name) || resolveCharId(rel.char_a)
+                const bId = resolveCharId(rel.char_b_name) || resolveCharId(rel.char_b)
                 if (aId && bId && aId !== bId) {
                   try {
                     await relationsApi.create(currentProject.id, {
@@ -278,8 +322,12 @@ export default function Characters() {
                       info_known_a_about_b: rel.info_known_a_about_b || [],
                       info_known_b_about_a: rel.info_known_b_about_a || [],
                     })
+                    createdRels++
                   } catch { /* skip */ }
                 }
+              }
+              if (createdRels === 0) {
+                notification.info({ message: '关系名称匹配失败', description: `AI生成了${relNetRes.relations.length}条关系但无法匹配到角色，可手动创建`, placement: 'topRight' })
               }
             } else {
               notification.info({ message: 'AI未生成关系网络', description: '可手动创建角色关系或重新生成', placement: 'topRight' })
@@ -612,8 +660,8 @@ export default function Characters() {
   }
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+    <div className="h-full flex flex-col overflow-auto">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2 flex-shrink-0">
         <div>
           <h1 className="text-2xl font-bold m-0">角色管理</h1>
           <p className="text-xs text-gray-400 mt-1">

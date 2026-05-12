@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -28,7 +28,12 @@ class Character(Base):
     behavior_never = Column(JSONType, default=list)
     behavior_conditional = Column(JSONType, default=list)
     status = Column(String(20), default="active")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    location = Column(String(100), nullable=True)
+    emotional_state = Column(String(50), nullable=True)
+    physical_state = Column(String(50), nullable=True)
+    current_goal = Column(Text, nullable=True)
+    known_info = Column(JSONType, default=list)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="characters")
 
@@ -50,7 +55,9 @@ class CharacterRelation(Base):
     arc_direction = Column(String(20), default="stable")
     trigger_condition = Column(Text, nullable=True)
     arc_milestones = Column(JSONType, default=list)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    value = Column(Integer, default=50)
+    last_interaction = Column(String(50), nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="character_relations")
     char_a = relationship("Character", foreign_keys=[char_a_id])

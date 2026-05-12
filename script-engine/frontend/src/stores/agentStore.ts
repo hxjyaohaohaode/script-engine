@@ -16,13 +16,13 @@ interface AgentState {
 }
 
 const defaultAgents: AgentStatus[] = [
-  { name: '编排Agent', status: 'idle', queueCount: 0 },
-  { name: '创作Agent', status: 'idle', queueCount: 0 },
-  { name: '审计Agent', status: 'idle', queueCount: 0 },
-  { name: '状态Agent', status: 'idle', queueCount: 0 },
-  { name: '素材Agent', status: 'idle', queueCount: 0 },
-  { name: '伏笔Agent', status: 'idle', queueCount: 0 },
-  { name: '创意Agent', status: 'idle', queueCount: 0 },
+  { name: 'orchestrator', status: 'idle', queueCount: 0 },
+  { name: 'creator', status: 'idle', queueCount: 0 },
+  { name: 'auditor', status: 'idle', queueCount: 0 },
+  { name: 'state_manager', status: 'idle', queueCount: 0 },
+  { name: 'material', status: 'idle', queueCount: 0 },
+  { name: 'foreshadow', status: 'idle', queueCount: 0 },
+  { name: '系统', status: 'idle', queueCount: 0 },
 ]
 
 export const useAgentStore = create<AgentState>((set) => ({

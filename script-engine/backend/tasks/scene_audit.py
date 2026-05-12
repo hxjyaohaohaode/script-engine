@@ -2,7 +2,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from . import _safe_task_decorator as task_decorator, update_progress, push_progress_via_ws, update_agent_task_status, complete_agent_task, fail_agent_task, mark_agent_task_retrying, run_async, get_db_async
+from tasks._helpers import _safe_task_decorator as task_decorator, update_progress, push_progress_via_ws, update_agent_task_status, complete_agent_task, fail_agent_task, mark_agent_task_retrying, run_async, get_db_async
 
 logger = logging.getLogger(__name__)
 AGENT_NAME = "审计Agent"
@@ -429,6 +429,7 @@ def _update_scene_status(scene_id: str, overall_result: str, audit_report: dict)
             "suggestions": audit_report.get("suggestions", []),
         })
         scene.audit_reports = reports
+        scene.suggestions = audit_report.get("suggestions", [])
         scene.status = "passed" if overall_result in {"pass", "pass_with_warnings"} else "rejected"
         scene.updated_at = datetime.now(UTC)
         db.commit()

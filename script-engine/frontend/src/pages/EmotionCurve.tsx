@@ -42,6 +42,7 @@ interface RhythmCheckResult {
   warnings: { chapter: number | null; type: string; detail: string }[]
   overall_score: number
   suggestions: string[]
+  ai_analyzed?: boolean
 }
 
 const RHYTHM_RULES: { name: string; check: (chs: ChapterEmotion[]) => { chapter: number; type: string; detail: string }[] }[] = [
@@ -118,6 +119,8 @@ export default function EmotionCurve() {
   const [loading, setLoading] = useState(false)
   const [fetchError, setFetchError] = useState<string | null>(null)
 
+  const [wowSuggestions, setWowSuggestions] = useState<string[]>([])
+
   const fetchEmotionData = useCallback(async () => {
     if (!currentProject?.id) return
     setLoading(true)
@@ -153,15 +156,19 @@ export default function EmotionCurve() {
           is_wow: s.is_wow_moment || false,
         }))
 
+        const hasScenes = emotionLevels.length > 0
+        const sceneAvg = hasScenes
+          ? Math.round((emotionLevels.reduce((a: number, b: number) => a + b, 0) / emotionLevels.length) * 10) / 10
+          : 0
+        const aiTarget = ch.emotion_target ?? 0
+
         chapterEmotions.push({
           chapter_number: ch.chapter_number,
           title: ch.title || `第${ch.chapter_number}章`,
-          avg_emotion: emotionLevels.length > 0
-            ? Math.round((emotionLevels.reduce((a: number, b: number) => a + b, 0) / emotionLevels.length) * 10) / 10
-            : (ch.emotion_target ?? 0),
-          peak_emotion: emotionLevels.length > 0 ? emotionLevels.reduce((a: number, b: number) => Math.max(a, b), -Infinity) : (ch.emotion_target ?? 0),
-          valley_emotion: emotionLevels.length > 0 ? emotionLevels.reduce((a: number, b: number) => Math.min(a, b), Infinity) : (ch.emotion_target ?? 0),
-          emotion_target: ch.emotion_target ?? 0,
+          avg_emotion: hasScenes ? sceneAvg : aiTarget,
+          peak_emotion: hasScenes ? emotionLevels.reduce((a: number, b: number) => Math.max(a, b), -Infinity) : aiTarget,
+          valley_emotion: hasScenes ? emotionLevels.reduce((a: number, b: number) => Math.min(a, b), Infinity) : aiTarget,
+          emotion_target: aiTarget,
           scenes: sceneEmotions,
           rhythm_warnings: [],
           wow_count: scenes.filter((s: any) => s.is_wow_moment).length,
@@ -231,10 +238,14 @@ export default function EmotionCurve() {
     updateAgent('创意Agent', { status: 'busy', currentTask: '设计情感曲线' })
     try {
       const result = await api.post<{ status: string; message: string; chapters?: Array<{ chapter_number: number; emotion_target: number }> }>(`/ai/emotion-curve-design/${currentProject.id}`)
+      if (result.status === 'error') {
+        notification.error({ message: 'AI 设计失败', description: result.message || '请检查 AI 服务是否可用', placement: 'topRight', duration: 6 })
+        return
+      }
       if (result.chapters && result.chapters.length > 0) {
         notification.success({ message: '情感曲线设计完成', description: `AI已优化${result.chapters.length}个章节的目标情感值，图表将自动更新`, placement: 'topRight' })
       } else {
-        notification.success({ message: '情感曲线设计已提交', description: 'AI正在全局视野下优化各章情感分配', placement: 'topRight' })
+        notification.warning({ message: '情感曲线设计完成但无结果', description: result.message || 'AI未返回有效的章节数据', placement: 'topRight' })
       }
       await fetchEmotionData()
     } catch (e) {
@@ -264,6 +275,7 @@ export default function EmotionCurve() {
         warnings: Array.isArray(raw?.warnings) ? raw.warnings : [],
         overall_score: typeof raw?.overall_score === 'number' ? raw.overall_score : 80,
         suggestions: Array.isArray(raw?.suggestions) ? raw.suggestions : [],
+        ai_analyzed: raw?.stats?.ai_analyzed === true || raw?.ai_analyzed === true,
       }
     } catch {
       backendResult = {
@@ -295,7 +307,9 @@ export default function EmotionCurve() {
     setIsChecking(false)
     notification.info({
       message: '节奏检查完成',
-      description: `综合评分: ${mergedResult.overall_score}/100，本地规则检出${localViolations.length}项，AI分析${backendResult?.violations?.length || 0}项`,
+      description: backendResult?.ai_analyzed
+        ? `综合评分: ${mergedResult.overall_score}/100，本地规则${localViolations.length}项 + AI深度分析`
+        : `综合评分: ${mergedResult.overall_score}/100（仅本地规则，AI未参与。共检出${localViolations.length}项问题）`,
       placement: 'topRight',
     })
   }
@@ -305,15 +319,28 @@ export default function EmotionCurve() {
     setIsOptimizing(true)
     updateAgent('创意Agent', { status: 'busy', currentTask: '哇塞时刻分布优化' })
     try {
-      await api.post(`/ai/wow-distribution/${currentProject.id}`)
-      notification.success({ message: '哇塞时刻分布优化已提交', description: 'AI正在优化哇塞时刻的分布密度与节奏，完成后将自动刷新。', placement: 'topRight' })
+      const result = await api.post<any>(`/ai/wow-distribution/${currentProject.id}`)
+      if (result?.status === 'error') {
+        notification.error({ message: '哇塞时刻分析失败', description: result.message || 'AI 服务不可用', placement: 'topRight', duration: 6 })
+        setWowSuggestions([])
+        updateAgent('创意Agent', { status: 'idle', currentTask: undefined })
+        setIsOptimizing(false)
+        return
+      }
+      const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : []
+      setWowSuggestions(suggestions)
+      if (suggestions.length > 0) {
+        const aiLabel = result?.ai_generated ? 'AI ' : ''
+        notification.success({ message: '哇塞时刻分布分析完成', description: `${aiLabel}提供了 ${suggestions.length} 条优化建议`, placement: 'topRight' })
+      } else {
+        notification.info({ message: '哇塞时刻分布分析完成', description: result?.message || '当前分布已较为合理', placement: 'topRight' })
+      }
     } catch (e) {
       notification.error({ message: '优化失败', description: (e as Error).message || '请检查 AI 服务是否可用', placement: 'topRight' })
-      return
+    } finally {
+      updateAgent('创意Agent', { status: 'idle', currentTask: undefined })
+      setIsOptimizing(false)
     }
-    setTimeout(() => fetchEmotionData(), 3000)
-    updateAgent('创意Agent', { status: 'idle', currentTask: undefined })
-    setIsOptimizing(false)
   }
 
   const handleDotClick = (data: any) => {
@@ -347,8 +374,22 @@ export default function EmotionCurve() {
     )
   }
 
+  const allEmotionTargetsZero = chapters.length > 0 && chapters.every(ch => ch.emotion_target === 0)
+  const hasUndesignedChapters = chapters.length > 0 && allEmotionTargetsZero
   return (
-    <div style={{ fontFamily: 'var(--font-family)', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)' }}>
+    <div style={{ fontFamily: 'var(--font-family)', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      {fetchError && (
+        <div style={{ background: '#fff3cd', border: '1px solid #ffc107', borderRadius: 8, padding: '8px 14px', marginBottom: 8, fontSize: 13, color: '#856404', flexShrink: 0 }}>
+          ⚠ {fetchError}
+          <Button type="link" size="small" onClick={fetchEmotionData} style={{ marginLeft: 8, padding: 0 }}>重试</Button>
+        </div>
+      )}
+      {!fetchError && hasUndesignedChapters && (
+        <div style={{ background: '#e0f2fe', border: '1px solid #0ea5e9', borderRadius: 8, padding: '10px 14px', marginBottom: 8, fontSize: 13, color: '#0369a1', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>💡 {chapters.length}个章节已创建，但尚未设计情感曲线。所有章节目标值均为默认值，图表可能显示为底部的平直线。</span>
+          <Button type="primary" size="small" icon={<RobotOutlined />} loading={isGenerating} onClick={handleAIDesign}>一键设计情感曲线</Button>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexShrink: 0 }}>
         <div>
           <h2 className="section-title" style={{ fontSize: 24 }}>审校修补</h2>
@@ -362,10 +403,11 @@ export default function EmotionCurve() {
         </Space>
       </div>
 
-      <div className="flex gap-2 flex-1 min-h-0">
+      <div style={{ display: 'flex', gap: 8, flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {/* 左侧：曲线大图 */}
-        <div className="flex-1 flex flex-col gap-2 min-w-0">
-          <Card size="small" className="flex-1">
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, overflow: 'hidden' }}>
+          <Card size="small" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 280 }}
+            styles={{ body: { flex: 1, overflow: 'hidden', padding: 12 } }}>
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartData} margin={{ top: 20, right: 30, left: 10, bottom: 10 }}
                 onClick={handleDotClick}>
@@ -397,9 +439,12 @@ export default function EmotionCurve() {
                           <div className="flex items-center gap-1"><span className="text-red-400">●</span>峰值: {d.peak_emotion}</div>
                           <div className="flex items-center gap-1"><span className="text-blue-400">●</span>低谷: {d.valley_emotion}</div>
                           {d.emotion_target > 0 && (
-                            <div className="flex items-center gap-1"><span className="text-emerald-500">◆</span>目标: {d.emotion_target}{!d.has_scenes ? ' (AI设计)' : ''}</div>
+                            <div className="flex items-center gap-1"><span className="text-emerald-500">◆</span>AI目标: {d.emotion_target}</div>
                           )}
                           {!d.has_scenes && <div className="text-gray-400 italic">暂未创建场景，显示AI目标值</div>}
+                          {d.has_scenes && Math.abs(d.avg_emotion - d.emotion_target) > 1.5 && d.emotion_target > 0 && (
+                            <div className="text-amber-500 text-[10px]">⚠ 实际均值与AI目标偏差 {Math.abs(d.avg_emotion - d.emotion_target).toFixed(1)}</div>
+                          )}
                           {d.has_wow && <div className="text-amber-500">⭐ 哇塞时刻</div>}
                           {d.has_warning && <div className="text-orange-500">⚠ 节奏警告</div>}
                         </div>
@@ -415,9 +460,9 @@ export default function EmotionCurve() {
                   dot={false} />
                 <Line type="monotone" dataKey="valley_emotion" stroke="#3b82f6" strokeWidth={1.5} strokeDasharray="3 3"
                   dot={false} />
-                <Line type="monotone" dataKey="emotion_target" stroke="#10b981" strokeWidth={2} strokeDasharray="8 4"
-                  dot={false}
-                  connectNulls={false} />
+                <Line type="monotone" dataKey="emotion_target" stroke="#10b981" strokeWidth={2.5} strokeDasharray="6 3"
+                  dot={{ r: 3, fill: '#10b981', stroke: '#fff', strokeWidth: 1.5 }}
+                  connectNulls={true} />
                 {chartData.filter(d => d.has_wow).map((d, i) => (
                   <ReferenceDot key={`wow-${i}`} x={d.label} y={d.avg_emotion + 0.8} r={12}
                     fill="#fbbf24" fillOpacity={0.25} stroke="#f59e0b" strokeWidth={1}
@@ -432,18 +477,18 @@ export default function EmotionCurve() {
           </Card>
 
           {/* 图例 */}
-          <div className="flex items-center gap-4 text-xs text-gray-500 px-2">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, fontSize: 12, color: '#6b7280', padding: '0 8px', flexShrink: 0 }}>
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-purple-500 rounded" />均值曲线</span>
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-red-400 rounded" style={{ borderStyle: 'dashed' }} />峰值线</span>
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-blue-400 rounded" style={{ borderStyle: 'dotted' }} />低谷线</span>
-            <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-emerald-500 rounded" style={{ borderStyle: 'dashed' }} />AI目标值</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-emerald-500 rounded" style={{ borderStyle: 'dashed' }} />AI设计目标</span>
             <span className="flex items-center gap-1"><span className="text-amber-500">★</span>哇塞时刻</span>
             <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-full bg-orange-500" />节奏警告</span>
           </div>
         </div>
 
         {/* 右侧：章节详情面板 */}
-        <div className="w-[320px] shrink-0 flex flex-col gap-2 overflow-auto">
+        <div style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
           {selectedChapter ? (
             <Card size="small" title={<span className="text-sm">{`第${selectedChapter.chapter_number}章 · ${selectedChapter.title}`}</span>}
               extra={<Button size="small" type="text" onClick={() => setSelectedChapter(null)}>关闭</Button>}>
@@ -477,7 +522,7 @@ export default function EmotionCurve() {
                       <div key={sc.scene_id} className="flex items-center gap-2">
                         <span className="text-[10px] font-mono text-gray-400 w-[58px]">{sc.scene_code}</span>
                         <Tag className="text-[10px] leading-tight">{SCENE_TYPE_LABELS[sc.scene_type] || sc.scene_type}</Tag>
-                        <div className="flex-1">
+                        <div style={{ flex: 1 }}>
                           <div className="h-1.5 bg-gray-200 dark:bg-slate-600 rounded-full overflow-hidden">
                             <div className="h-full rounded-full transition-all"
                               style={{
@@ -543,7 +588,7 @@ export default function EmotionCurve() {
               </div>
             </Card>
           ) : (
-            <Card size="small" className="flex-1 flex items-center justify-center">
+            <Card size="small" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Empty description="点击曲线上的数据点查看章节详情" image={Empty.PRESENTED_IMAGE_SIMPLE} />
             </Card>
           )}
@@ -552,10 +597,10 @@ export default function EmotionCurve() {
 
       {/* 节奏检查结果 */}
       {rhythmResult && (
-        <Collapse size="small" className="shrink-0 mt-1" items={[{
+        <Collapse size="small" style={{ flexShrink: 0, marginTop: 4 }} items={[{
           key: 'rhythm',
           label: (
-            <div className="flex items-center gap-2 text-sm">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
               <ThunderboltOutlined />
               <span>节奏检查结果</span>
               <Tag color={rhythmResult.overall_score >= 85 ? 'green' : rhythmResult.overall_score >= 70 ? 'orange' : 'red'}>
@@ -601,8 +646,31 @@ export default function EmotionCurve() {
         }]} />
       )}
 
+      {/* 哇塞时刻分布建议 */}
+      {wowSuggestions.length > 0 && (
+        <Collapse size="small" style={{ flexShrink: 0, marginTop: 4 }} items={[{
+          key: 'wow',
+          label: (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+              <StarOutlined style={{ color: '#f59e0b' }} />
+              <span>哇塞时刻分布建议</span>
+              <Tag color="gold">{wowSuggestions.length}条建议</Tag>
+            </div>
+          ),
+          children: (
+            <div>
+              {wowSuggestions.map((s, i) => (
+                <div key={i} style={{ fontSize: 12, padding: '4px 0', color: 'var(--color-ink)', borderBottom: i < wowSuggestions.length - 1 ? '1px solid var(--color-border)' : 'none' }}>
+                  <span style={{ color: '#f59e0b', marginRight: 6 }}>◆</span>{s}
+                </div>
+              ))}
+            </div>
+          ),
+        }]} />
+      )}
+
       {/* 底部操作栏 */}
-      <div className="flex items-center gap-2 shrink-0 mt-2">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginTop: 8 }}>
         <Button icon={<RobotOutlined />} type="primary" loading={isGenerating} onClick={handleAIDesign} size="small">
           AI 设计情感曲线
         </Button>

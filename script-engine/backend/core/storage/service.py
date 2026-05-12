@@ -157,8 +157,20 @@ class StorageService:
         return [dict(zip(cols, row)) for row in rows]
 
     async def update_character_state(self, character_id: str, updates: dict):
-        set_clauses = [f"{key} = :{key}" for key in updates]
-        params = {"character_id": character_id, **updates}
+        _ALLOWED_CHAR_COLS = {
+            "location", "emotional_state", "physical_state", "current_goal",
+            "known_info", "status", "role_type", "background", "core_goal",
+            "core_fear", "surface_image", "true_self", "language_style",
+            "catchphrase", "dark_secret", "arc_description",
+        }
+        safe_updates = {k: v for k, v in updates.items() if k in _ALLOWED_CHAR_COLS}
+        if not safe_updates:
+            return
+        serialized = {}
+        for k, v in safe_updates.items():
+            serialized[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
+        set_clauses = [f"{key} = :{key}" for key in serialized]
+        params = {"character_id": character_id, **serialized}
         await self.db.execute(
             text(f"UPDATE characters SET {', '.join(set_clauses)} WHERE id = :character_id"),
             params,
@@ -166,8 +178,18 @@ class StorageService:
         await self.db.commit()
 
     async def update_foreshadow_state(self, foreshadow_id: str, updates: dict):
+        _ALLOWED_FS_COLS = {
+            "current_status", "reinforce_count", "reinforce_scenes",
+            "plant_scene_id", "reveal_scene_id", "health", "wow_plans",
+            "wow_selected", "foreshadow_tier", "worldview_refs",
+            "character_refs", "foreshadow_links", "reclaim_status",
+            "plant_location", "reinforce_locations", "reveal_location",
+        }
+        safe_updates = {k: v for k, v in updates.items() if k in _ALLOWED_FS_COLS}
+        if not safe_updates:
+            return
         serialized = {}
-        for k, v in updates.items():
+        for k, v in safe_updates.items():
             serialized[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
         set_clauses = [f"{key} = :{key}" for key in serialized]
         params = {"foreshadow_id": foreshadow_id, **serialized}
@@ -179,12 +201,23 @@ class StorageService:
 
     async def update_relation(self, project_id: str, char_a: str, char_b: str,
                                updates: dict):
-        set_clauses = [f"{key} = :{key}" for key in updates]
+        _ALLOWED_REL_COLS = {
+            "trust", "favor", "value", "last_interaction",
+            "info_known_a_about_b", "info_known_b_about_a",
+            "info_asymmetry", "is_hidden", "arc_direction", "arc_milestones",
+        }
+        safe_updates = {k: v for k, v in updates.items() if k in _ALLOWED_REL_COLS}
+        if not safe_updates:
+            return
+        serialized = {}
+        for k, v in safe_updates.items():
+            serialized[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v
+        set_clauses = [f"{key} = :{key}" for key in serialized]
         params = {
             "project_id": project_id,
             "char_a": char_a,
             "char_b": char_b,
-            **updates,
+            **serialized,
         }
         now = _now_expr()
         await self.db.execute(
@@ -295,8 +328,10 @@ class StorageService:
             await self.db.execute(
                 text(
                     f"INSERT INTO character_relations (id, project_id, char_a_id, char_b_id, "
-                    f"relation_type, trust, favor, info_known_a_about_b, info_known_b_about_a, updated_at) "
-                    f"VALUES (:id, :pid, :char_a_id, :char_b_id, :rtype, :trust, :favor, :info_a, :info_b, {now})"
+                    f"relation_type, trust, favor, info_known_a_about_b, info_known_b_about_a, "
+                    f"info_asymmetry, is_hidden, arc_direction, arc_milestones, updated_at) "
+                    f"VALUES (:id, :pid, :char_a_id, :char_b_id, :rtype, :trust, :favor, :info_a, :info_b, "
+                    f"'{{}}', 0, 'stable', '[]', {now})"
                 ),
                 {
                     "id": rel_id, "pid": project_id,
@@ -330,7 +365,7 @@ class StorageService:
                 try:
                     chars_list = json.loads(chars_inv) if isinstance(chars_inv, str) else chars_inv
                     for c in (chars_list if isinstance(chars_list, list) else []):
-                        c_name = str(c) if isinstance(c, str) else c.get("name", str(c))
+                        c_name = str(c) if isinstance(c, str) else (c.get("name", str(c)) if isinstance(c, dict) else str(c))
                         if c_name not in char_scene_map:
                             char_scene_map[c_name] = []
                         char_scene_map[c_name].append(str(sid))
@@ -493,11 +528,12 @@ class StorageService:
         await self.db.execute(
             text(
                 """
-                INSERT INTO elements (project_id, element_type, element_code, name, description)
-                VALUES (:project_id, :element_type, :element_code, :name, :description)
+                INSERT INTO elements (id, project_id, element_type, element_code, name, description)
+                VALUES (:id, :project_id, :element_type, :element_code, :name, :description)
                 """
             ),
             {
+                "id": str(uuid.uuid4()),
                 "project_id": project_id,
                 "element_type": element["type"],
                 "element_code": element["code"],
@@ -612,7 +648,7 @@ class StorageService:
                         fs_ops = []
                 if isinstance(fs_ops, list):
                     for op in fs_ops:
-                        if isinstance(op, dict) and str(op.get("fs_id")) == str(foreshadow_id):
+                        if isinstance(op, dict) and str(op.get("fs_id", "")) == str(foreshadow_id):
                             matched.append(d)
                             break
         return matched
@@ -810,8 +846,12 @@ class StorageService:
         if result.rowcount == 0:
             await self.db.execute(
                 text(
-                    "INSERT INTO project_configs (id, project_id, custom_checker_rules, created_at, updated_at) "
-                    f"VALUES (:id, :pid, :rules, {_now_expr()}, {_now_expr()})"
+                    "INSERT INTO project_configs (id, project_id, custom_checker_rules, "
+                    "genre, core_contradiction, style, chapter_count, target_word_count, "
+                    "plot_complexity, world_building_depth, character_depth_target, work_mode, "
+                    "created_at, updated_at) "
+                    f"VALUES (:id, :pid, :rules, '', '', '', 10, 50000, 5, 5, 5, 'standard', "
+                    f"{_now_expr()}, {_now_expr()})"
                 ),
                 {"id": str(uuid.uuid4()), "pid": project_id, "rules": json.dumps(rules, ensure_ascii=False)},
             )
@@ -822,7 +862,18 @@ class StorageService:
 
     async def clear_characters(self, project_id: str):
         await self.db.execute(
+            text("DELETE FROM character_relations WHERE project_id = :pid"),
+            {"pid": project_id},
+        )
+        await self.db.execute(
             text("DELETE FROM characters WHERE project_id = :pid"),
+            {"pid": project_id},
+        )
+        await self.db.commit()
+
+    async def clear_relations(self, project_id: str):
+        await self.db.execute(
+            text("DELETE FROM character_relations WHERE project_id = :pid"),
             {"pid": project_id},
         )
         await self.db.commit()
@@ -886,10 +937,13 @@ class StorageService:
                     f"INSERT INTO foreshadows (id, project_id, fs_code, name, fs_type, surface_layer, "
                     f"deep_layer, truth_layer, plant_scene_id, reinforce_scenes, reveal_scene_id, "
                     f"wow_factor, player_reaction, depends_on, enables, current_status, reinforce_count, "
-                    f"health, wow_plans, wow_selected, created_at) VALUES "
+                    f"health, wow_plans, wow_selected, foreshadow_tier, worldview_refs, character_refs, "
+                    f"foreshadow_links, plant_location, reinforce_locations, reveal_location, reclaim_status, "
+                    f"created_at) VALUES "
                     f"(:id, :pid, :code, :name, :fs_type, :surface, :deep, :truth, :plant, :reinforce, "
                     f":reveal, :wow_factor, :player_reaction, :depends, :enables, 'design', 0, "
-                    f"'normal', '[]', NULL, {now})"
+                    f"'normal', '[]', NULL, :tier, '[]', '[]', '[]', :plant_loc, '[]', :reveal_loc, 'unplanted', "
+                    f"{now})"
                 ),
                 {
                     "id": fs_id, "pid": project_id, "code": fs_code,
@@ -905,6 +959,9 @@ class StorageService:
                     "player_reaction": fs.get("player_reaction", None),
                     "depends": json.dumps(fs.get("depends_on", []), ensure_ascii=False),
                     "enables": json.dumps(fs.get("enables", []), ensure_ascii=False),
+                    "tier": fs.get("foreshadow_tier", "chapter"),
+                    "plant_loc": fs.get("plant_location"),
+                    "reveal_loc": fs.get("reveal_location"),
                 },
             )
         await self.db.commit()
@@ -982,11 +1039,11 @@ class StorageService:
                 "weather": scene_data.get("weather", ""),
                 "emotion_level": scene_data.get("emotion_level", 5),
                 "narration": scene_data.get("narration", ""),
-                "dialogue": scene_data.get("dialogue", ""),
-                "actions": scene_data.get("actions", ""),
-                "choices": scene_data.get("choices", ""),
+                "dialogue": scene_data.get("dialogue", "[]"),
+                "actions": scene_data.get("actions", "[]"),
+                "choices": scene_data.get("choices", "[]"),
                 "foreshadow_ops": scene_data.get("foreshadow_ops", "[]"),
-                "causal_chain": scene_data.get("causal_chain", ""),
+                "causal_chain": scene_data.get("causal_chain", "{}"),
                 "characters_involved": scene_data.get("characters_involved", "[]"),
                 "status": scene_data.get("status", "pending"),
                 "version": scene_data.get("version", 1),

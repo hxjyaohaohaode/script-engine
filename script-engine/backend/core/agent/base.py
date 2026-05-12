@@ -14,6 +14,14 @@ from typing import Any, Optional
 from core.gateway.client import ModelGateway, ModelResponse
 from core.rag.retriever import RAGRetriever
 from core.storage.service import StorageService
+from core.agent.skill import Skill
+
+
+def layer0_value(layer0: dict, key: str, default: str = "") -> str:
+    val = layer0.get(key, {})
+    if isinstance(val, dict):
+        return str(val.get("value", default))
+    return str(val) if val is not None else default
 
 
 @dataclass
@@ -39,7 +47,7 @@ class BaseAgent(ABC):
 
     name: str
     description: str
-    skills: dict[str, Any]
+    skills: dict[str, Skill]
     checkers: list = []
 
     def __init__(self, gateway: ModelGateway, rag: RAGRetriever,
@@ -78,7 +86,7 @@ class BaseAgent(ABC):
         ...
 
     @abstractmethod
-    def _select_skill(self, task_type: str):
+    def _select_skill(self, task_type: str) -> Skill:
         ...
 
     async def _post_process(self, task: AgentTask, result: dict):

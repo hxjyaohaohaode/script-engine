@@ -6,6 +6,7 @@ import {
 } from '@ant-design/icons'
 import { api, pipelineApi } from '../api/client'
 import { useProjectStore } from '../stores/projectStore'
+import { useAITaskStore } from '../stores/aiTaskStore'
 import { eventBus, DataEvents } from '../services/eventBus'
 
 interface PipelineStatus {
@@ -55,6 +56,7 @@ const STEP_STATUS: Record<string, { label: string; color: string }> = {
 export default function PipelineView() {
   const { notification } = App.useApp()
   const { currentProject } = useProjectStore()
+  const { pipeline: storePipeline, isPipelineRunning, setPipeline: setStorePipeline, setPipelineRunning: setStorePipelineRunning } = useAITaskStore()
   const projectId = currentProject?.id || ''
   const [status, setStatus] = useState<PipelineStatus | null>(null)
   const [template, setTemplate] = useState<TemplateInfo | null>(null)
@@ -89,7 +91,44 @@ export default function PipelineView() {
         backendDownRef.current = false
         setBackendDown(false)
       }
-      if (data.template) {
+
+      const isRunning = data.status === 'running'
+      const isFailed = data.status === 'failed'
+      const isCompleted = data.status === 'completed'
+      const isCancelled = data.status === 'cancelled'
+      const isWaiting = data.status === 'waiting_human'
+
+      if (isRunning || isFailed || isCompleted || isCancelled || isWaiting) {
+        setStorePipelineRunning(isRunning)
+        if (data.template && (!storePipeline || storePipeline.phases.length === 0)) {
+          try {
+            const tpl = await pipelineApi.getTemplate(data.template)
+            if (!mountedRef.current || signal?.aborted) return
+            setTemplate(tpl)
+            const phases = (tpl.phases || []).map((p, i) => ({
+              name: p.name,
+              steps: p.steps.length,
+              humanGate: p.human_gate,
+              currentStep: i < data.current_phase ? p.steps.length : i === data.current_phase ? data.current_step : 0,
+              status: i < data.current_phase ? 'completed' as const : i === data.current_phase ? 'running' as const : 'pending' as const,
+            }))
+            const completedCount = (data.task_results || []).filter(r => r.status === 'completed').length
+            const totalSteps = phases.reduce((sum, p) => sum + p.steps, 0) || 1
+            const overallProgress = isCompleted ? 100 : Math.round((completedCount / totalSteps) * 100)
+            setStorePipeline({
+              status: isRunning ? 'running' : isFailed ? 'failed' : isCancelled ? 'cancelled' : isWaiting ? 'waiting_human' : 'completed',
+              currentPhase: phases[data.current_phase]?.name || '',
+              currentPhaseIndex: data.current_phase,
+              totalPhases: phases.length,
+              overallProgress,
+              message: data.error_message || (isRunning ? '流水线运行中' : isCompleted ? '已完成' : isFailed ? '执行失败' : isCancelled ? '已取消' : '等待审核'),
+              phases,
+            })
+          } catch {}
+        }
+      }
+
+      if (data.template && !template) {
         try {
           const tpl = await pipelineApi.getTemplate(data.template)
           if (!mountedRef.current || signal?.aborted) return
@@ -111,7 +150,7 @@ export default function PipelineView() {
     } finally {
       fetchingRef.current = false
     }
-  }, [projectId])
+  }, [projectId, storePipeline, template])
 
   useEffect(() => {
     mountedRef.current = true
@@ -140,15 +179,15 @@ export default function PipelineView() {
 
   useEffect(() => {
     if (!autoAdvance || !status || advancingRef.current) return
-    const isRunning = status.status === 'running' || status.status === 'not_started' || status.status === 'not_initialized'
+    const isRunning = effectiveIsRunning
     if (isRunning) {
       const timer = setTimeout(() => handleAdvance(), 2000)
       return () => clearTimeout(timer)
     }
-    if (status.status === 'waiting_human') {
+    if (effectiveIsWaitingHuman) {
       setAutoAdvance(false)
     }
-  }, [autoAdvance, status?.status])
+  }, [autoAdvance, status?.status, storePipeline?.status])
 
   const handleAdvance = async () => {
     if (!projectId || advancingRef.current) return
@@ -242,6 +281,13 @@ export default function PipelineView() {
   const failedPhaseIdx = status?.current_phase ?? 0
   const failedStepIdx = status?.current_step ?? 0
 
+  const effectiveStatus = storePipeline?.status || status?.status || 'not_started'
+  const effectiveIsRunning = isPipelineRunning || effectiveStatus === 'running' || effectiveStatus === 'not_started' || effectiveStatus === 'not_initialized'
+  const effectiveIsWaitingHuman = effectiveStatus === 'waiting_human'
+  const effectiveIsCompleted = effectiveStatus === 'completed'
+  const effectiveIsFailed = effectiveStatus === 'failed'
+  const effectiveIsCancelled = effectiveStatus === 'cancelled'
+
   if (!projectId) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -250,18 +296,13 @@ export default function PipelineView() {
     )
   }
 
-  const statusInfo = status ? STATUS_CONFIG[status.status] || { label: status.status, color: '#6b7280', icon: null } : { label: '加载中...', color: '#6b7280', icon: null }
-  const phaseIdx = status?.current_phase ?? 0
+  const statusInfo = STATUS_CONFIG[effectiveStatus] || { label: effectiveStatus, color: '#6b7280', icon: null }
+  const phaseIdx = storePipeline?.currentPhaseIndex ?? status?.current_phase ?? 0
   const stepIdx = status?.current_step ?? 0
-  const currentPhaseName = template?.phases?.[phaseIdx >= 0 ? phaseIdx : 0]?.name || '-'
-  const isRunning = status?.status === 'running' || status?.status === 'not_started' || status?.status === 'not_initialized'
-  const isWaitingHuman = status?.status === 'waiting_human'
-  const isCompleted = status?.status === 'completed'
-  const isFailed = status?.status === 'failed'
-  const isCancelled = status?.status === 'cancelled'
+  const currentPhaseName = storePipeline?.currentPhase || template?.phases?.[phaseIdx >= 0 ? phaseIdx : 0]?.name || '-'
   const completedCount = status?.task_results?.filter(r => r.status === 'completed').length || 0
   const totalPhases = template?.phases?.length || 0
-  const progressPct = totalPhases > 0 ? Math.round((phaseIdx / totalPhases) * 100) : 0
+  const progressPct = storePipeline?.overallProgress ?? (totalPhases > 0 ? Math.round((phaseIdx / totalPhases) * 100) : 0)
 
   return (
     <div style={{ fontFamily: 'var(--font-family)' }}>
@@ -309,7 +350,7 @@ export default function PipelineView() {
       <div className="mb-4">
         <Progress
           percent={progressPct}
-          status={isCompleted ? 'success' : isFailed ? 'exception' : isCancelled ? 'normal' : 'active'}
+          status={effectiveIsCompleted ? 'success' : effectiveIsFailed ? 'exception' : effectiveIsCancelled ? 'normal' : 'active'}
           strokeColor={{
             '0%': '#3b82f6',
             '100%': '#10b981',
@@ -336,16 +377,16 @@ export default function PipelineView() {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          {!isCompleted && !isFailed && !isCancelled && (
+          {!effectiveIsCompleted && !effectiveIsFailed && !effectiveIsCancelled && (
             <>
               <Button
                 type="primary"
                 icon={advancing ? <SyncOutlined spin /> : <PlayCircleOutlined />}
                 onClick={handleAdvance}
                 loading={advancing}
-                disabled={isWaitingHuman}
+                disabled={effectiveIsWaitingHuman}
               >
-                {isWaitingHuman ? '等待审核中' : advancing ? '执行中...' : '推进下一步'}
+                {effectiveIsWaitingHuman ? '等待审核中' : advancing ? '执行中...' : '推进下一步'}
               </Button>
               <Checkbox
                 checked={autoAdvance}
@@ -355,7 +396,7 @@ export default function PipelineView() {
               </Checkbox>
             </>
           )}
-          {isWaitingHuman && (
+          {effectiveIsWaitingHuman && (
             <div className="flex items-center gap-3 flex-wrap">
               <Button
                 type="primary"
@@ -383,7 +424,7 @@ export default function PipelineView() {
               </Button>
             </div>
           )}
-          {isFailed && (
+          {effectiveIsFailed && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               <Button
                 icon={<ReloadOutlined />}
@@ -487,7 +528,7 @@ export default function PipelineView() {
               )}
             </div>
           )}
-          {isCancelled && (
+          {effectiveIsCancelled && (
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}

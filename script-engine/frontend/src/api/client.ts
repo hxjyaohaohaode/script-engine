@@ -46,10 +46,10 @@ async function request<T>(url: string, options?: RequestInit & { signal?: AbortS
     })
   } catch (e: any) {
     if (e?.name === 'AbortError' || signal?.aborted) {
-      const err = new Error('请求已取消') as any
-      err.status = 0
-      err.detail = '请求已取消'
-      throw err
+      const abortErr = new Error('Request aborted') as any
+      abortErr.name = 'AbortError'
+      abortErr.silent = true
+      throw abortErr
     }
     throw new ApiError(0, e?.message || '网络请求失败')
   }
@@ -370,9 +370,9 @@ export const projectsApi = {
 // ========== Characters API ==========
 
 export const charactersApi = {
-  list: (projectId: string, params?: { role_type?: string }) => {
+  list: (projectId: string, params?: { role_type?: string }, signal?: AbortSignal) => {
     const qs = params?.role_type ? `?role_type=${params.role_type}` : ''
-    return api.get<Character[]>(`/projects/${projectId}/characters${qs}`)
+    return api.get<Character[]>(`/projects/${projectId}/characters${qs}`, signal)
   },
   get: (projectId: string, charId: string) =>
     api.get<Character>(`/projects/${projectId}/characters/${charId}`),
@@ -387,8 +387,8 @@ export const charactersApi = {
 // ========== Relations API ==========
 
 export const relationsApi = {
-  list: (projectId: string) =>
-    api.get<CharacterRelation[]>(`/projects/${projectId}/relations`),
+  list: (projectId: string, signal?: AbortSignal) =>
+    api.get<CharacterRelation[]>(`/projects/${projectId}/relations`, signal),
   create: (projectId: string, data: Partial<CharacterRelation>) =>
     api.post<CharacterRelation>(`/projects/${projectId}/relations`, data),
   update: (projectId: string, relId: string, data: Partial<CharacterRelation>) =>
@@ -400,12 +400,12 @@ export const relationsApi = {
 // ========== Foreshadows API ==========
 
 export const foreshadowsApi = {
-  list: (projectId: string, params?: { fs_type?: string; current_status?: string }) => {
+  list: (projectId: string, params?: { fs_type?: string; current_status?: string }, signal?: AbortSignal) => {
     const parts: string[] = []
     if (params?.fs_type) parts.push(`fs_type=${params.fs_type}`)
     if (params?.current_status) parts.push(`current_status=${params.current_status}`)
     const qs = parts.length ? `?${parts.join('&')}` : ''
-    return api.get<Foreshadow[]>(`/projects/${projectId}/foreshadows${qs}`)
+    return api.get<Foreshadow[]>(`/projects/${projectId}/foreshadows${qs}`, signal)
   },
   get: (projectId: string, fsId: string) =>
     api.get<Foreshadow>(`/projects/${projectId}/foreshadows/${fsId}`),
@@ -415,8 +415,8 @@ export const foreshadowsApi = {
     api.put<Foreshadow>(`/projects/${projectId}/foreshadows/${fsId}`, data),
   delete: (projectId: string, fsId: string) =>
     api.delete<void>(`/projects/${projectId}/foreshadows/${fsId}`),
-  listRelations: (projectId: string) =>
-    api.get<ForeshadowRelation[]>(`/projects/${projectId}/foreshadows/relations`),
+  listRelations: (projectId: string, signal?: AbortSignal) =>
+    api.get<ForeshadowRelation[]>(`/projects/${projectId}/foreshadows/relations`, signal),
   createRelation: (projectId: string, data: Partial<ForeshadowRelation>) =>
     api.post<ForeshadowRelation>(`/projects/${projectId}/foreshadows/relations`, data),
   updateRelation: (projectId: string, relId: string, data: Partial<ForeshadowRelation>) =>

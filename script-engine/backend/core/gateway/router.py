@@ -65,9 +65,9 @@ ROUTING_TABLE = {
         "reason": "创意评分需要审美能力",
     },
     "analyze.structure": {
-        "models": ["mimo-v2.5-pro"],
-        "fallback": ["mimo-v2.5"],
-        "reason": "结构分析，MiMo 性价比好",
+        "models": ["mimo-v2.5-pro", "ds-v4-pro"],
+        "fallback": ["ds-v4-pro", "mimo-v2-pro", "mimo-v2.5"],
+        "reason": "结构分析，MiMo首选，DeepSeek强回退",
     },
 
     "manage.state": {

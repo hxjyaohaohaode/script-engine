@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager, contextmanager
+from typing import AsyncGenerator
 
 from sqlalchemy import func, text
 from sqlalchemy import select as sa_select
@@ -39,7 +40,7 @@ class Base(DeclarativeBase):
     pass
 
 
-async def get_db() -> AsyncSession:
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         try:
             yield session

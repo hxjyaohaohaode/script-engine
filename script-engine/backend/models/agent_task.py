@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -21,7 +21,7 @@ class AgentTask(Base):
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, default=0)
     max_retries = Column(Integer, default=3)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
 

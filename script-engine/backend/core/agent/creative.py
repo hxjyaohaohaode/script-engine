@@ -2,7 +2,7 @@ import json
 import logging
 import random
 
-from core.agent.base import BaseAgent, AgentTask, AgentResult
+from core.agent.base import BaseAgent, AgentTask, AgentResult, layer0_value
 from core.agent.skill import Skill
 from core.agent.registry import register_agent
 
@@ -266,7 +266,7 @@ class CreativeAgent(BaseAgent):
 真相层: {payload.get('truth_layer', '')}
 
 ## 项目语境
-核心矛盾: {layer0.get('core_contradiction', {}).get('value', '')}"""
+核心矛盾: {layer0_value(layer0, 'core_contradiction')}"""
 
             return {"foreshadow_info": foreshadow_info}
 

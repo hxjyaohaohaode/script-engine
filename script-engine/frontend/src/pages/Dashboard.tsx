@@ -101,11 +101,20 @@ function PipelineStatusCard() {
   const { notification } = App.useApp()
   const [apiKeyStatus, setApiKeyStatus] = useState<{ deepseek: boolean; mimo: boolean } | null>(null)
   const initialFetchedRef = useRef(false)
+  const optimisticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     api.get<{ deepseek_api_key_set: boolean; mimo_api_key_set: boolean }>('/config/llm')
       .then(data => setApiKeyStatus({ deepseek: data.deepseek_api_key_set, mimo: data.mimo_api_key_set }))
       .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (optimisticTimerRef.current) {
+        clearTimeout(optimisticTimerRef.current)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -251,6 +260,28 @@ function PipelineStatusCard() {
                 size="small"
                 strokeColor="var(--color-accent)"
               />
+              {pipeline.phases && pipeline.phases.length > 0 && (
+                <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                  {pipeline.phases.map((ph, i) => {
+                    const icon = ph.status === 'completed' ? '✅' : ph.status === 'running' ? '🔄' : ph.status === 'failed' ? '❌' : '⏳'
+                    return (
+                      <span key={i} style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 6,
+                        background: ph.status === 'running' ? 'var(--color-accent-soft)' :
+                                     ph.status === 'completed' ? 'var(--color-success-soft)' :
+                                     ph.status === 'failed' ? '#fff1f0' : 'var(--color-surface2)',
+                        color: ph.status === 'running' ? 'var(--color-accent)' :
+                                ph.status === 'completed' ? 'var(--color-success)' :
+                                ph.status === 'failed' ? '#ff4d4f' : 'var(--color-muted)',
+                      }}>
+                        {icon} {ph.name}
+                        {ph.status === 'running' && ph.currentStep > 0 && ` (${ph.currentStep}/${ph.steps})`}
+                        {ph.status === 'completed' && ` ✓`}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -278,7 +309,6 @@ function PipelineStatusCard() {
                 setStarting(true)
                 try {
                   const result = await api.post<{ status: string; message: string }>(`/projects/${currentProject.id}/pipeline/auto-run`)
-                  // 乐观更新：立即显示运行中状态，等待WebSocket确认
                   useAITaskStore.getState().setPipelineRunning(true)
                   useAITaskStore.getState().setPipeline({
                     status: 'running',
@@ -295,7 +325,26 @@ function PipelineStatusCard() {
                       status: i === 0 ? 'running' : 'pending' as const,
                     })),
                   })
+                  if (optimisticTimerRef.current) clearTimeout(optimisticTimerRef.current)
+                  optimisticTimerRef.current = setTimeout(async () => {
+                    try {
+                      const checkData = await api.get<{ status: string }>(`/projects/${currentProject.id}/pipeline/status`)
+                      if (checkData.status !== 'running') {
+                        useAITaskStore.getState().setPipelineRunning(false)
+                        useAITaskStore.getState().setPipeline({
+                          status: checkData.status as any,
+                          currentPhase: '',
+                          currentPhaseIndex: 0,
+                          totalPhases: 0,
+                          overallProgress: 0,
+                          message: checkData.status === 'failed' ? '流水线启动失败' : '流水线未在运行',
+                          phases: [],
+                        })
+                      }
+                    } catch {}
+                  }, 15000)
                 } catch (err: any) {
+                  useAITaskStore.getState().setPipelineRunning(false)
                   notification.error({ message: '启动流水线失败', description: err?.detail || err?.message || '请检查后端服务是否运行', placement: 'topRight' })
                 } finally {
                   setStarting(false)
@@ -466,10 +515,17 @@ export default function Dashboard() {
     data: dashboardData, isLoading, isError, error, refetch, isFetching,
   } = useQuery<DashboardResponse>({
     queryKey: ['dashboard', currentProject?.id],
-    queryFn: () => api.get<DashboardResponse>(`/projects/${currentProject!.id}/dashboard`),
+    queryFn: ({ signal }) => api.get<DashboardResponse>(`/projects/${currentProject!.id}/dashboard`, signal),
     enabled: !!currentProject?.id,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    retry: (failureCount, err: any) => {
+      if (err?.name === 'AbortError') return false
+      return failureCount < 2
+    },
+    refetchOnWindowFocus: (query) => {
+      return query.state.error?.name !== 'AbortError'
+    },
   })
 
   const busyAgents = agents.filter(a => a.status === 'busy').length
@@ -553,8 +609,8 @@ export default function Dashboard() {
   const recentActivity = dashboardData?.recent_activity
 
   return (
-    <div style={{ fontFamily: 'var(--font-family)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+    <div style={{ fontFamily: 'var(--font-family)', height: '100%', overflow: 'auto' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexShrink: 0 }}>
         <div>
           <h2 className="section-title" style={{ fontSize: 24 }}>项目总览</h2>
           <p className="text-muted" style={{ margin: '4px 0 0' }}>

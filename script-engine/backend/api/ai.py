@@ -1,4 +1,4 @@
-import json
+﻿import json
 import uuid
 import re
 import logging
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class AgentTaskResponse(BaseModel):
+class TaskProgressResponse(BaseModel):
     task_id: str
     status: str
     progress: int
@@ -95,6 +95,121 @@ def _extract_json_block(text: str) -> str:
     return text
 
 
+def _repair_truncated_json_text(text: str) -> dict | list | None:
+    if not text:
+        return None
+    start_obj = text.find("{")
+    start_arr = text.find("[")
+    if start_obj == -1 and start_arr == -1:
+        return None
+    is_array = False
+    start = -1
+    if start_obj == -1:
+        start = start_arr
+        is_array = True
+    elif start_arr == -1:
+        start = start_obj
+    elif start_arr < start_obj:
+        start = start_arr
+        is_array = True
+    else:
+        start = start_obj
+    fragment = text[start:]
+    if is_array:
+        last_complete_obj_end = -1
+        depth = 0
+        for i, ch in enumerate(fragment):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    last_complete_obj_end = i
+        if last_complete_obj_end > 0:
+            candidate = fragment[:last_complete_obj_end + 1] + "]"
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        open_braces = 0
+        open_brackets = 0
+        in_string = False
+        escape_next = False
+        for ch in fragment:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                open_braces += 1
+            elif ch == "}":
+                open_braces -= 1
+            elif ch == "[":
+                open_brackets += 1
+            elif ch == "]":
+                open_brackets -= 1
+        closing = ""
+        if in_string:
+            closing += '"'
+        closing += "}" * max(0, open_braces) + "]" * max(0, open_brackets)
+        candidate = fragment + closing
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    else:
+        open_braces = 0
+        open_brackets = 0
+        in_string = False
+        escape_next = False
+        last_complete_key_pos = -1
+        for i, ch in enumerate(fragment):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                open_braces += 1
+            elif ch == "}":
+                open_braces -= 1
+                if open_braces == 0:
+                    last_complete_key_pos = i
+            elif ch == "[":
+                open_brackets += 1
+            elif ch == "]":
+                open_brackets -= 1
+        if last_complete_key_pos > 0:
+            candidate = fragment[:last_complete_key_pos + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        closing = ""
+        if in_string:
+            closing += '"'
+        closing += "]" * max(0, open_brackets) + "}" * max(0, open_braces)
+        candidate = fragment + closing
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 async def _call_agent(intent: str, system_prompt: str, user_prompt: str,
                       temperature: float = 0.7, max_tokens: int = 8192,
                       cost_profile: str = "balanced") -> str:
@@ -147,10 +262,15 @@ async def _call_and_parse_json(intent: str, system_prompt: str, user_prompt: str
         json_block = _extract_json_block(content)
         return json.loads(json_block)
     except json.JSONDecodeError:
-        logger.warning("Failed to parse JSON from LLM response, raw content: %s", content[:500])
-        if not allow_salvage:
-            raise
-        return _salvage_content(content)
+        logger.warning("Failed to parse JSON from LLM response (raw), attempting repair...")
+    repaired = _repair_truncated_json_text(content)
+    if repaired is not None:
+        logger.info("Successfully repaired truncated JSON response")
+        return repaired
+    logger.warning("JSON repair failed, raw content: %s", content[:500])
+    if not allow_salvage:
+        raise
+    return _salvage_content(content)
 
 # ============================================================================
 #  上下文收集助手：确保每个AI调用都能获取完整的项目上下文
@@ -297,7 +417,7 @@ async def _gather_foreshadow_context(db: AsyncSession, project_id: uuid.UUID) ->
 
 # ==================== Agent Task Dispatch ====================
 
-@router.post("/ai/projects/{project_id}/scenes/{scene_id}/generate", response_model=AgentTaskResponse)
+@router.post("/ai/projects/{project_id}/scenes/{scene_id}/generate", response_model=TaskProgressResponse)
 async def dispatch_scene_generate(project_id: uuid.UUID, scene_id: uuid.UUID,
                                   body: SceneDispatchRequest | None = None,
                                   db: AsyncSession = Depends(get_db)):
@@ -312,10 +432,10 @@ async def dispatch_scene_generate(project_id: uuid.UUID, scene_id: uuid.UUID,
             "requirements": {"user_requirements": (body.requirements or "").strip() if body else ""},
         },
     )
-    return AgentTaskResponse(**response)
+    return TaskProgressResponse(**response)
 
 
-@router.post("/ai/projects/{project_id}/scenes/{scene_id}/audit", response_model=AgentTaskResponse)
+@router.post("/ai/projects/{project_id}/scenes/{scene_id}/audit", response_model=TaskProgressResponse)
 async def dispatch_scene_audit(project_id: uuid.UUID, scene_id: uuid.UUID,
                                 db: AsyncSession = Depends(get_db)):
     response = await enqueue_task(
@@ -329,10 +449,10 @@ async def dispatch_scene_audit(project_id: uuid.UUID, scene_id: uuid.UUID,
             "requirements": {},
         },
     )
-    return AgentTaskResponse(**response)
+    return TaskProgressResponse(**response)
 
 
-@router.post("/ai/projects/{project_id}/foreshadows/generate", response_model=AgentTaskResponse)
+@router.post("/ai/projects/{project_id}/foreshadows/generate", response_model=TaskProgressResponse)
 async def dispatch_foreshadow_generate(project_id: uuid.UUID,
                                         db: AsyncSession = Depends(get_db)):
     runtime = await load_project_runtime(db, project_id)
@@ -432,7 +552,7 @@ async def dispatch_foreshadow_generate(project_id: uuid.UUID,
             "chapter_count": chapter_count,
         },
     )
-    return AgentTaskResponse(**response)
+    return TaskProgressResponse(**response)
 
 
 class ForeshadowDesignResponse(BaseModel):
@@ -604,7 +724,7 @@ async def generate_foreshadow_design(project_id: uuid.UUID,
 
 
 @router.post("/ai/projects/{project_id}/foreshadows/{foreshadow_id}/wow-plans",
-             response_model=AgentTaskResponse)
+             response_model=TaskProgressResponse)
 async def dispatch_wow_plans(project_id: uuid.UUID, foreshadow_id: uuid.UUID,
                               db: AsyncSession = Depends(get_db)):
     from models.foreshadow import Foreshadow
@@ -651,7 +771,7 @@ async def dispatch_wow_plans(project_id: uuid.UUID, foreshadow_id: uuid.UUID,
             "foreshadow_id": str(foreshadow_id),
         },
     )
-    return AgentTaskResponse(**response)
+    return TaskProgressResponse(**response)
 
 
 @router.get("/ai/tasks/{task_id}")
@@ -679,7 +799,7 @@ async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)):
     return await cancel_dispatched_task(db, task_id)
 
 
-@router.post("/ai/projects/{project_id}/full-audit", response_model=AgentTaskResponse)
+@router.post("/ai/projects/{project_id}/full-audit", response_model=TaskProgressResponse)
 async def dispatch_full_audit(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     response = await enqueue_task(
         db,
@@ -688,7 +808,7 @@ async def dispatch_full_audit(project_id: uuid.UUID, db: AsyncSession = Depends(
         payload={},
         task_kwargs={"project_id": str(project_id)},
     )
-    return AgentTaskResponse(**response)
+    return TaskProgressResponse(**response)
 
 
 # ==================== World Gen ====================
@@ -1500,6 +1620,8 @@ async def generate_chapter_outline(project_id: uuid.UUID, db: AsyncSession = Dep
 @router.post("/ai/emotion-curve-design/{project_id}")
 async def design_emotion_curve(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     from models.chapter import Chapter as ChapterModel
+    from models.scene import Scene
+    from models.project_config import ProjectConfig
 
     chapters_result = await db.execute(
         select(ChapterModel).where(ChapterModel.project_id == project_id)
@@ -1507,32 +1629,177 @@ async def design_emotion_curve(project_id: uuid.UUID, db: AsyncSession = Depends
     )
     existing = chapters_result.scalars().all()
 
-    chapters_info = [
-        {"number": ch.chapter_number, "title": ch.title or "",
-         "emotion_target": ch.emotion_target}
-        for ch in existing
-    ]
+    if not existing:
+        return {"status": "error", "message": "项目中暂无章节数据，请先在章节大纲页面创建章节"}
 
-    system_prompt = """你是情感曲线设计专家，擅长优化互动影游剧本的情感节奏。
-分析维度：情感起伏、节奏密度、哇塞时刻分布、玩家情绪耗竭曲线。"""
+    scenes_result = await db.execute(
+        select(Scene).where(Scene.project_id == project_id)
+        .order_by(Scene.scene_code)
+    )
+    scenes = scenes_result.scalars().all()
+    scenes_by_chapter: dict[str, list] = {}
+    for s in scenes:
+        cid = str(s.chapter_id) if s.chapter_id else None
+        if cid:
+            scenes_by_chapter.setdefault(cid, []).append(s)
 
-    user_prompt = f"""请分析并优化以下章节的情感分配：
+    config_result = await db.execute(
+        select(ProjectConfig).where(ProjectConfig.project_id == project_id)
+    )
+    config = config_result.scalar_one_or_none()
 
+    world = await _gather_world_context(db, project_id)
+    world_context = "\n".join(f"• {k}: {v[:400]}" for k, v in list(world.items())[:12])
+
+    character_context = await _gather_character_context(db, project_id)
+    character_summary = ""
+    if character_context:
+        lines = character_context.split("\n\n")
+        character_summary = "\n\n".join(lines[:6])
+
+    chapters_info = []
+    for ch in existing:
+        ch_scenes = scenes_by_chapter.get(str(ch.id), [])
+        scene_emotions = []
+        wow_scene_count = 0
+        for s in ch_scenes:
+            if s.emotion_level is not None:
+                scene_emotions.append(int(s.emotion_level))
+            if s.is_wow_moment:
+                wow_scene_count += 1
+        avg_scene_emotion = round(sum(scene_emotions) / len(scene_emotions), 1) if scene_emotions else None
+
+        ch_info = {
+            "number": ch.chapter_number,
+            "title": ch.title or f"第{ch.chapter_number}章",
+            "summary": (ch.summary or "")[:300],
+            "core_conflict": (ch.core_conflict or "")[:300],
+            "current_emotion_target": ch.emotion_target,
+            "scene_count": len(ch_scenes),
+            "avg_scene_emotion": avg_scene_emotion,
+            "wow_scene_count": wow_scene_count,
+        }
+        if ch.foreshadow_tasks and isinstance(ch.foreshadow_tasks, list):
+            ch_info["foreshadow_tasks"] = [str(t) for t in ch.foreshadow_tasks[:3]]
+        if ch.focus_characters and isinstance(ch.focus_characters, list):
+            ch_info["focus_characters"] = [str(c) for c in ch.focus_characters[:4]]
+        chapters_info.append(ch_info)
+
+    genre = config.genre if config else ""
+    tone = config.tone if config else ""
+    target_chapters = config.chapter_count if config else len(existing)
+
+    system_prompt = f"""你是全球顶尖的情感曲线架构师，专精互动影游剧本的情感节奏设计。你的设计直接影响玩家的沉浸感和情感投入度。
+
+【情感曲线设计核心理论 — 必须遵守】
+
+1. **三幕结构情感模型**：
+   - 第一幕（建置，约25%）：情感从4-5起步，逐步攀升到6-7，建立角色认同
+   - 第二幕（对抗，约50%）：情感波浪式起伏，低谷3-4与高峰7-8交替，制造张力
+   - 第三幕（高潮/结局，约25%）：情感急速攀升至9-10，终极高潮后可能留有回味性低谷
+
+2. **五幕波浪理论**：
+   - 幕1（开端）：情感4-5，建立世界和角色
+   - 幕2（上升）：情感6-7，冲突显现， stakes 提升
+   - 幕3（中点反转）：情感达到第一个高峰8，随后急转直下至3-4
+   - 幕4（坠落与挣扎）：情感在低谷3-5徘徊，逐步积蓄力量
+   - 幕5（高潮与结局）：情感冲至9-10，终极对决后收束至5-6（余韵）
+
+3. **情感节拍规则**：
+   - 每3-5章必须有一个情感高峰（≥8）
+   - 高峰后必须跟随至少1-2章的情感回落（≤5），让玩家"喘息"
+   - 连续高强度（≥7）不得超过2章，否则玩家情感疲劳
+   - 连续低强度（≤3）不得超过2章，否则玩家流失
+   - 章间情感落差控制在1-4点，剧烈转折（≥5点）每10章不超过2次
+   - 结局前2章必须开始情感攀升，结局章为全剧最高（9-10）
+
+4. **互动影游特殊考量**：
+   - 决策点前情感应处于中等张力（5-6），让玩家有思考空间但不被压迫
+   - 重大分支后的章节情感应有差异化设计（不同分支对应不同情感基调）
+   - 哇塞时刻所在章节情感应≥7，且前后章节形成对比
+   - 角色死亡/背叛/真相揭露等重场戏所在章节应标注为高情感（8-9）
+
+5. **数值精度要求**：
+   - 每章情感目标值为0-10的整数
+   - 必须给出设计理由，不能只是数字罗列
+   - 必须考虑已有场景的实际情感均值，给出"目标vs实际"的偏差分析
+"""
+
+    user_prompt = f"""请为以下互动影游项目设计专业的情感曲线分配方案。
+
+━━━━━━━━━━━━━━━━━━━━━━
+📖 项目信息
+━━━━━━━━━━━━━━━━━━━━━━
+🎭 题材：{genre or '未指定'}
+🎨 基调：{tone or '未指定'}
+📐 章节数：{len(existing)}章 / 目标{target_chapters}章
+
+━━━━━━━━━━━━━━━━━━━━━━
+🌍 世界观上下文
+━━━━━━━━━━━━━━━━━━━━━━
+{world_context or '世界观尚未详细设定'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+👥 主要角色
+━━━━━━━━━━━━━━━━━━━━━━
+{character_summary or '角色尚未详细设定'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+📋 章节详情（含当前场景数据）
+━━━━━━━━━━━━━━━━━━━━━━
 {json.dumps(chapters_info, ensure_ascii=False, indent=2)}
 
-请从全局视野出发，调整各章的情感目标值（0-10），确保：
-1. 总体呈波浪式上升
-2. 避免连续3章以上高强度
-3. 每章之间有合理的落差（1-4点）
-4. 结局章为情感巅峰
+━━━━━━━━━━━━━━━━━━━━━━
 
-以JSON格式返回优化后的情感分配方案。"""
+【设计任务】
+
+1. **全局分析**：分析当前情感分配的问题（如果有场景数据，分析实际均值与目标的偏差）
+2. **重新分配**：为每章给出新的情感目标值（0-10整数），必须遵循三幕结构和五幕波浪理论
+3. **设计理由**：每章必须说明为什么是这个数值——与本章核心冲突、角色关系变化、伏笔回收的关联
+4. **节奏诊断**：标注潜在的节奏问题（连续高潮/低谷、落差过大等）
+5. **优化建议**：给出3-5条具体的场景调整建议（如"第X章需要增加一个情感缓冲场景"）
+
+【输出格式 — 严格JSON】
+```json
+{{
+  "analysis": "全局分析（200-500字，分析当前情感节奏的问题和优化方向）",
+  "chapters": [
+    {{
+      "chapter_number": 1,
+      "emotion_target": 5,
+      "reason": "设计理由（50-150字，必须关联本章核心冲突或角色关系）",
+      "act": "第一幕|第二幕|第三幕",
+      "beat_type": "建置|上升|高峰|回落|挣扎|高潮|余韵"
+    }}
+  ],
+  "rhythm_issues": [
+    {{
+      "chapter": 3,
+      "issue": "连续高潮",
+      "suggestion": "建议插入过渡章节降低情感强度"
+    }}
+  ],
+  "optimization_suggestions": [
+    "具体优化建议1",
+    "具体优化建议2"
+  ]
+}}
+```
+
+要求：
+- 所有章节必须覆盖，不能遗漏
+- emotion_target必须是0-10的整数
+- reason必须具体，不能写"情感适中"这种空话，要关联剧情内容
+- 必须标注每章属于哪一幕和哪种节拍类型"""
 
     try:
-        result = await _call_and_parse_json("analyze.structure", system_prompt, user_prompt,
-                                            temperature=0.8, max_tokens=4096)
-    except Exception:
-        result = []
+        result = await _call_and_parse_json(
+            "analyze.structure", system_prompt, user_prompt,
+            temperature=0.75, max_tokens=8192, cost_profile="quality"
+        )
+    except Exception as e:
+        logger.error("Emotion curve design LLM call failed: %s", str(e))
+        return {"status": "error", "message": f"AI 服务调用失败，情感曲线设计未完成。错误: {str(e)[:300]}", "chapters": []}
 
     optimized = []
     if isinstance(result, dict):
@@ -1540,23 +1807,8 @@ async def design_emotion_curve(project_id: uuid.UUID, db: AsyncSession = Depends
     elif isinstance(result, list):
         optimized = result
 
-    if not optimized and existing:
-        fallback_values = []
-        chapter_count = len(existing)
-        for index, ch in enumerate(existing):
-            if chapter_count == 1:
-                target_value = 8
-            elif index == 0:
-                target_value = 4
-            elif index == chapter_count - 1:
-                target_value = 9
-            else:
-                target_value = min(8, 5 + index)
-            fallback_values.append({
-                "chapter_number": ch.chapter_number,
-                "emotion_target": target_value,
-            })
-        optimized = fallback_values
+    if not optimized:
+        return {"status": "error", "message": "AI 返回格式不正确，未能提取有效的章节情感分配数据，请重试", "chapters": []}
 
     chapter_by_number = {ch.chapter_number: ch for ch in existing}
     updated = []
@@ -1577,13 +1829,63 @@ async def design_emotion_curve(project_id: uuid.UUID, db: AsyncSession = Depends
             "chapter_number": chapter_number,
             "title": chapter.title or f"第{chapter_number}章",
             "emotion_target": target_value,
+            "reason": item.get("reason", ""),
+            "act": item.get("act", ""),
+            "beat_type": item.get("beat_type", ""),
         })
 
     if updated:
         await db.commit()
-        return {"status": "ok", "message": "情感曲线优化完成", "chapters": updated}
+        return {
+            "status": "ok",
+            "message": f"情感曲线优化完成，已更新{len(updated)}个章节",
+            "chapters": updated,
+            "analysis": result.get("analysis", "") if isinstance(result, dict) else "",
+            "rhythm_issues": result.get("rhythm_issues", []) if isinstance(result, dict) else [],
+            "optimization_suggestions": result.get("optimization_suggestions", []) if isinstance(result, dict) else [],
+        }
 
     return {"status": "error", "message": "AI 未返回可应用的情感曲线方案"}
+
+
+def _generate_fallback_emotion_curve(existing: list) -> list[dict]:
+    """基于三幕结构生成回退情感曲线"""
+    chapter_count = len(existing)
+    if chapter_count == 0:
+        return []
+    if chapter_count == 1:
+        return [{"chapter_number": existing[0].chapter_number, "emotion_target": 8}]
+
+    act1_end = max(1, round(chapter_count * 0.25))
+    act2_end = max(act1_end + 1, round(chapter_count * 0.75))
+
+    def _target_for(index: int) -> int:
+        if index == 0:
+            return 4
+        if index == chapter_count - 1:
+            return 9
+        if index < act1_end:
+            return min(7, 4 + index)
+        if index < act2_end:
+            pos = index - act1_end
+            length = act2_end - act1_end
+            wave = [6, 8, 5, 7, 4, 6, 8, 5]
+            if length > 0:
+                wave_idx = pos % len(wave)
+                return wave[wave_idx]
+            return 6
+        return min(10, 7 + (index - act2_end) * 2)
+
+    return [
+        {
+            "chapter_number": ch.chapter_number,
+            "emotion_target": _target_for(idx),
+            "reason": "基于三幕结构的回退分配",
+            "act": "第一幕" if idx < act1_end else "第二幕" if idx < act2_end else "第三幕",
+            "beat_type": "建置",
+        }
+        for idx, ch in enumerate(existing)
+    ]
 
 
 # ==================== Wow Distribution ====================
@@ -1592,29 +1894,80 @@ async def design_emotion_curve(project_id: uuid.UUID, db: AsyncSession = Depends
 async def optimize_wow_distribution(project_id: uuid.UUID,
                                      db: AsyncSession = Depends(get_db)):
     from models.scene import Scene
+    from models.chapter import Chapter as ChapterModel
+    from models.project_config import ProjectConfig
 
     scenes_result = await db.execute(
         select(Scene).where(Scene.project_id == project_id).order_by(Scene.scene_code)
     )
     scenes = scenes_result.scalars().all()
 
+    if not scenes:
+        return {"status": "ok", "message": "项目中暂无场景数据", "suggestions": ["建议先在场景工作台创建场景，再使用哇塞时刻分析功能"]}
+
+    chapters_result = await db.execute(
+        select(ChapterModel).where(ChapterModel.project_id == project_id)
+        .order_by(ChapterModel.chapter_number)
+    )
+    chapters = chapters_result.scalars().all()
+    chapters_by_id = {str(ch.id): ch for ch in chapters}
+
+    config_result = await db.execute(
+        select(ProjectConfig).where(ProjectConfig.project_id == project_id)
+    )
+    config = config_result.scalar_one_or_none()
+    genre = config.genre if config else ""
+    tone = config.tone if config else ""
+    total_chapters = len(chapters)
+
     wow_scenes = [s for s in scenes if s.is_wow_moment]
     total = len(scenes)
+    wow_count = len(wow_scenes)
 
-    system_prompt = """你是哇塞时刻分布优化专家，擅长在剧本中合理安排反转点和高潮点。
-分析维度：反转密度的均匀性、类型多样化、情感梯度的合理性。"""
+    wow_detail = []
+    for s in wow_scenes:
+        ch_num = chapters_by_id.get(str(s.chapter_id), None)
+        wow_detail.append({
+            "code": s.scene_code,
+            "chapter": ch_num.chapter_number if ch_num else "?",
+            "type": s.wow_type or "未分类",
+            "emotion": int(s.emotion_level) if s.emotion_level is not None else 0,
+        })
 
-    user_prompt = f"""请分析以下项目的哇塞时刻分布：
+    chapter_wow_counts = {}
+    for s in wow_scenes:
+        ch_num = chapters_by_id.get(str(s.chapter_id), None)
+        key = ch_num.chapter_number if ch_num else 0
+        chapter_wow_counts[key] = chapter_wow_counts.get(key, 0) + 1
 
-总场景数: {total}
-哇塞时刻数: {len(wow_scenes)}
-哇塞时刻场景: {json.dumps([{"code": s.scene_code, "type": s.wow_type, "emotion": s.emotion_level} for s in wow_scenes], ensure_ascii=False)}
+    system_prompt = f"""你是互动影游哇塞时刻（反转/高潮/爽点）分布设计专家。
+题材：{genre or '未指定'} | 基调：{tone or '未指定'} | 共{total_chapters}章
 
-请提供3-5条优化建议，以JSON数组格式返回。"""
+【哇塞时刻设计原则】
+1. 密度原则：每2-4章至少1个哇塞时刻，避免连续多章空窗
+2. 梯度原则：哇塞时刻的情感强度应逐步升级，结局章最强
+3. 类型多样化：反转(plot_twist)、情感爆发(emotional)、战斗高潮(action)、真相揭示(revelation)交替出现
+4. 起伏节奏：哇塞时刻后应有至少1章的缓冲期让玩家消化
+5. 三幕对应：第一幕（序幕-建置）少量铺垫性哇塞，第二幕（对抗）密集，第三幕（高潮-结局）全剧最强哇塞"""
+
+    user_prompt = f"""请分析以下项目的哇塞时刻分布，并给出具体优化建议。
+
+总场景数：{total} | 总章节数：{total_chapters} | 哇塞时刻数：{wow_count}
+
+各章哇塞时刻分布：{json.dumps(chapter_wow_counts, ensure_ascii=False)}
+
+当前哇塞时刻详情：{json.dumps(wow_detail, ensure_ascii=False, indent=2)}
+
+请诊断问题并给出3-5条具体可执行的优化建议。要求：
+- 每条建议必须明确指向具体章节（如"第3章至第5章之间哇塞时刻空窗过长，建议在第4章末尾增加一个小反转"）
+- 建议要关联题材和基调特点
+- 如果分布已经合理，也要给出1-2条锦上添花的建议
+
+以JSON数组格式返回建议列表：{{"suggestions": ["建议1", "建议2", ...]}}"""
 
     try:
         result = await _call_and_parse_json("analyze.structure", system_prompt, user_prompt,
-                                            temperature=0.8, max_tokens=4096)
+                                            temperature=0.75, max_tokens=4096, cost_profile="balanced")
         suggestions = []
         if isinstance(result, dict):
             suggestions = result.get("suggestions", result.get("优化建议", []))
@@ -1622,11 +1975,21 @@ async def optimize_wow_distribution(project_id: uuid.UUID,
                 suggestions = [suggestions]
         elif isinstance(result, list):
             suggestions = [str(s) if not isinstance(s, str) else s for s in result[:5]]
-        return {"status": "ok", "message": "哇塞时刻分布优化完成", "suggestions": suggestions}
+
+        if not suggestions:
+            suggestions = [
+                f"当前{wow_count}个哇塞时刻分布在{total}个场景中（密度{wow_count}/{total}），"
+                f"建议保持每2-4章至少1个哇塞时刻的节奏",
+                "确保哇塞时刻类型多样化（反转/情感/动作/揭示交替出现）",
+                "结局前章节应安排全剧最强的哇塞时刻"
+            ]
+
+        return {"status": "ok", "message": f"哇塞时刻分布分析完成，共{len(suggestions)}条建议", "suggestions": suggestions, "ai_generated": True}
     except HTTPException:
         raise
-    except Exception:
-        return {"status": "error", "message": "AI 服务暂不可用"}
+    except Exception as e:
+        logger.error("Wow distribution LLM call failed: %s", str(e))
+        return {"status": "error", "message": f"AI 服务调用失败，无法分析哇塞时刻分布。错误: {str(e)[:200]}", "suggestions": [], "ai_generated": False}
 
 
 # ==================== Rhythm Check ====================
@@ -1635,6 +1998,8 @@ async def optimize_wow_distribution(project_id: uuid.UUID,
 async def rhythm_check(project_id: uuid.UUID,
                        db: AsyncSession = Depends(get_db)):
     from models.scene import Scene
+    from models.chapter import Chapter as ChapterModel
+    from models.project_config import ProjectConfig
 
     scenes_result = await db.execute(
         select(Scene).where(Scene.project_id == project_id).order_by(Scene.scene_code)
@@ -1642,7 +2007,21 @@ async def rhythm_check(project_id: uuid.UUID,
     scenes = scenes_result.scalars().all()
 
     if not scenes:
-        return {"status": "ok", "rhythm_status": "no_data", "issues": [], "suggestions": []}
+        return {"status": "ok", "rhythm_status": "no_data", "issues": [], "suggestions": [], "violations": [], "warnings": [], "overall_score": 0, "stats": {}}
+
+    chapters_result = await db.execute(
+        select(ChapterModel).where(ChapterModel.project_id == project_id)
+        .order_by(ChapterModel.chapter_number)
+    )
+    chapters = chapters_result.scalars().all()
+    chapters_by_id = {str(ch.id): ch for ch in chapters}
+
+    config_result = await db.execute(
+        select(ProjectConfig).where(ProjectConfig.project_id == project_id)
+    )
+    config = config_result.scalar_one_or_none()
+    genre = config.genre if config else ""
+    tone = config.tone if config else ""
 
     emotion_values = []
     for s in scenes:
@@ -1653,18 +2032,18 @@ async def rhythm_check(project_id: uuid.UUID,
                 emotion_values.append(5)
 
     if not emotion_values:
-        return {"status": "ok", "rhythm_status": "no_data", "issues": [], "suggestions": []}
+        return {"status": "ok", "rhythm_status": "no_data", "issues": [], "suggestions": [], "violations": [], "warnings": [], "overall_score": 0, "stats": {}}
 
-    issues = []
-    suggestions = []
+    local_issues = []
+    local_suggestions = []
 
     consecutive_high = 0
     for i, e in enumerate(emotion_values):
         if e >= 8:
             consecutive_high += 1
             if consecutive_high >= 2:
-                issues.append(f"连续{consecutive_high}个高紧张场景(≥8)，位置: 场景{scenes[i].scene_code if i < len(scenes) else '?'}")
-                suggestions.append(f"在场景{scenes[i].scene_code}后插入缓冲场景(情感值≈5)")
+                local_issues.append(f"连续{consecutive_high}个高紧张场景(≥8)，位置: 场景{scenes[i].scene_code if i < len(scenes) else '?'}")
+                local_suggestions.append(f"在场景{scenes[i].scene_code}后插入缓冲场景(情感值≈5)")
         else:
             consecutive_high = 0
 
@@ -1673,42 +2052,123 @@ async def rhythm_check(project_id: uuid.UUID,
         if e <= 3:
             consecutive_low += 1
             if consecutive_low >= 3:
-                issues.append(f"连续{consecutive_low}个低情感场景(≤3)，位置: 场景{scenes[i].scene_code if i < len(scenes) else '?'}")
-                suggestions.append(f"在场景{scenes[i].scene_code}后安排引爆点(情感值≥9)")
+                local_issues.append(f"连续{consecutive_low}个低情感场景(≤3)，位置: 场景{scenes[i].scene_code if i < len(scenes) else '?'}")
+                local_suggestions.append(f"在场景{scenes[i].scene_code}后安排引爆点(情感值≥9)")
         else:
             consecutive_low = 0
 
     avg_emotion = sum(emotion_values) / len(emotion_values)
     emotion_range = max(emotion_values) - min(emotion_values)
 
-    if not issues:
-        rhythm_status = "healthy"
-    elif any("高紧张" in i for i in issues):
-        rhythm_status = "tension_overload"
-    else:
-        rhythm_status = "pacing_slow"
-
-    violations = []
-    for issue in issues:
-        violations.append({
+    local_violations = []
+    for issue in local_issues:
+        local_violations.append({
             "chapter": None,
-            "type": rhythm_status,
+            "type": "[本地规则] " + ("tension_overload" if "高紧张" in issue else "pacing_slow"),
             "detail": issue,
         })
 
-    overall_score = max(0, 100 - len(issues) * 12 - max(0, 6 - int(avg_emotion)) * 2)
+    local_overall_score = max(0, 100 - len(local_issues) * 12 - max(0, 6 - int(avg_emotion)) * 2)
+
+    chapter_emotion_summary = []
+    for ch in chapters:
+        ch_scenes = [s for s in scenes if str(s.chapter_id) == str(ch.id)]
+        ch_vals = [int(s.emotion_level) for s in ch_scenes if s.emotion_level is not None]
+        if ch_vals:
+            chapter_emotion_summary.append({
+                "chapter": ch.chapter_number,
+                "title": ch.title or f"第{ch.chapter_number}章",
+                "avg": round(sum(ch_vals) / len(ch_vals), 1),
+                "scenes": len(ch_vals),
+                "summary": (ch.summary or "")[:200],
+            })
+
+    ai_violations = []
+    ai_suggestions = []
+    ai_overall_score = None
+
+    if chapter_emotion_summary:
+        try:
+            system_prompt = f"""你是互动影游节奏分析专家。题材：{genre or '未指定'} | 基调：{tone or '未指定'}
+
+分析维度：情感节奏、紧张感累积、喘息空间、情感曲线连贯性、章节间过渡平滑度"""
+
+            user_prompt = f"""请分析以下项目的情感节奏：
+
+章节情感概要：{json.dumps(chapter_emotion_summary, ensure_ascii=False, indent=2)}
+
+局部规则检出的问题：{json.dumps(local_issues if local_issues else ['无'], ensure_ascii=False)}
+
+请从以下角度进行分析，以JSON格式返回：
+{{
+  "overall_score": 85,
+  "analysis": "200-400字的整体节奏分析",
+  "violations": [
+    {{"chapter": 3, "type": "情感断层", "detail": "从第2章均值8骤降到第3章均值3，落差过大"}}
+  ],
+  "suggestions": ["在第2章和第3章之间增加过渡场景", "..."],
+  "warnings": [{{"chapter": 5, "type": "节奏预警", "detail": "..."}}]
+}}
+
+注意：
+- chapter字段使用章节编号（数字）
+- overall_score为0-100整数
+- 建议要具体可操作"""
+
+            ai_result = await _call_and_parse_json("analyze.structure", system_prompt, user_prompt,
+                                                    temperature=0.7, max_tokens=4096, cost_profile="balanced")
+            if isinstance(ai_result, dict):
+                ai_overall_score = ai_result.get("overall_score")
+                ai_raw_violations = ai_result.get("violations") or []
+                ai_raw_suggestions = ai_result.get("suggestions") or []
+                ai_raw_warnings = ai_result.get("warnings") or []
+
+                for v in ai_raw_violations:
+                    if isinstance(v, dict):
+                        ai_violations.append({
+                            "chapter": v.get("chapter"),
+                            "type": f"[AI分析] {v.get('type', '节奏问题')}",
+                            "detail": str(v.get("detail", "")),
+                        })
+
+                ai_suggestions = [str(s) for s in ai_raw_suggestions if s]
+
+                for w in ai_raw_warnings:
+                    if isinstance(w, dict):
+                        ai_violations.append({
+                            "chapter": w.get("chapter"),
+                            "type": f"[AI分析] {w.get('type', '警告')}",
+                            "detail": str(w.get("detail", "")),
+                        })
+        except Exception as e:
+            logger.warning("AI rhythm check failed, using local only: %s", str(e))
+
+    ai_analyzed = len(ai_violations) > 0 or ai_overall_score is not None
+    merged_violations = local_violations + ai_violations
+
+    if ai_overall_score is not None:
+        final_score = int((local_overall_score * 0.4 + ai_overall_score * 0.6))
+    else:
+        final_score = local_overall_score
+
+    all_suggestions = local_suggestions + ai_suggestions
+    if not all_suggestions:
+        all_suggestions = ["当前节奏基本合理，继续保持现有情感节奏设计",
+                           "建议在结局前3章开始逐步攀升情感强度"]
 
     return {
         "status": "ok",
-        "rhythm_status": rhythm_status,
-        "issues": issues,
-        "violations": violations,
+        "rhythm_status": "analyzed",
+        "issues": local_issues + (ai_suggestions[:3] if not local_issues else []),
+        "violations": merged_violations,
         "warnings": [],
-        "overall_score": overall_score,
-        "suggestions": suggestions,
+        "overall_score": final_score,
+        "suggestions": all_suggestions[:8],
         "stats": {
             "avg_emotion": round(avg_emotion, 1),
             "emotion_range": emotion_range,
             "scene_count": len(emotion_values),
+            "chapter_count": len(chapters),
+            "ai_analyzed": ai_analyzed,
         },
     }

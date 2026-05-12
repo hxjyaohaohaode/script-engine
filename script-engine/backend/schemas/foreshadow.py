@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 FS_CODE_PATTERN = re.compile(r"^(F-[A-Z]+-\d{3}|FS-\d{3,}|F[A-Z]-\d{3,})$")
 VALID_FS_TYPES = ["global", "chapter", "scene", "interactive"]
+VALID_FS_STATUSES = ["design", "active", "planted", "reinforced", "revealed", "abandoned"]
 
 
 class ForeshadowCreate(BaseModel):
@@ -48,6 +49,13 @@ class ForeshadowCreate(BaseModel):
     def validate_fs_type(cls, v: str) -> str:
         if v not in VALID_FS_TYPES:
             raise ValueError(f"无效的伏笔类型，允许: {', '.join(VALID_FS_TYPES)}")
+        return v
+
+    @field_validator("current_status")
+    @classmethod
+    def validate_current_status(cls, v: str) -> str:
+        if v not in VALID_FS_STATUSES:
+            raise ValueError(f"无效的伏笔状态，允许: {', '.join(VALID_FS_STATUSES)}")
         return v
 
 

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, Integer, DateTime, ForeignKey, Boolean, String
 from sqlalchemy.orm import relationship
 
@@ -19,7 +19,7 @@ class EmotionCurve(Base):
     is_wow_moment = Column(Boolean, default=False)
     wow_type = Column(String(30), nullable=True)
     position_order = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="emotion_curves")
     chapter = relationship("Chapter", backref="emotion_curves")

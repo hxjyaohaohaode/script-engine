@@ -53,10 +53,15 @@ export default function PipelineProgressBar() {
   const [starting, setStarting] = useState(false)
   const { notification } = App.useApp()
   const projectIdRef = useRef<string | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (!currentProject?.id || projectIdRef.current === currentProject.id) return
     projectIdRef.current = currentProject.id
+
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
 
     const fetchInitialStatus = async () => {
       try {
@@ -67,8 +72,9 @@ export default function PipelineProgressBar() {
           template: string
           error_message: string
           task_results: Array<{ key: string; phase: string; agent: string; skill: string; status: string; completed_at: string }>
-        }>(`/projects/${currentProject.id}/pipeline/status`)
+        }>(`/projects/${currentProject.id}/pipeline/status`, ctrl.signal)
 
+        if (ctrl.signal.aborted) return
         if (!data || data.status === 'not_initialized') return
 
         const isRunning = data.status === 'running'
@@ -87,7 +93,7 @@ export default function PipelineProgressBar() {
                 name: string
                 description: string
                 phases: Array<{ name: string; human_gate: boolean; steps: Array<{ agent: string; skill: string }> }>
-              }>(`/templates/${encodeURIComponent(data.template)}`)
+              }>(`/templates/${encodeURIComponent(data.template)}`, ctrl.signal)
               phases = (tpl.phases || []).map((p, i) => ({
                 name: p.name,
                 steps: p.steps.length,
@@ -116,6 +122,7 @@ export default function PipelineProgressBar() {
     }
 
     fetchInitialStatus()
+    return () => { ctrl.abort() }
   }, [currentProject?.id, setPipeline, setPipelineRunning])
 
   if (!currentProject) return null

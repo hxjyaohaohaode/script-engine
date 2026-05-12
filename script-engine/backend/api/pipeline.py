@@ -59,13 +59,26 @@ async def auto_run_pipeline(project_id: str, background_tasks: BackgroundTasks,
     sm = PipelineStateMachine(db)
     state = await sm.get_state(project_id)
 
-    # 如果流水线正在运行中，拒绝重复启动
     if state and state.status == PipelineStatus.RUNNING:
         raise HTTPException(status_code=409, detail="流水线正在运行中，请勿重复启动")
 
+    has_content = False
+    rerun_mode = "fresh"
     if state and state.status in (PipelineStatus.FAILED, PipelineStatus.COMPLETED, PipelineStatus.CANCELLED):
+        chars_result = await db.execute(
+            __import__("sqlalchemy").text("SELECT COUNT(*) FROM characters WHERE project_id = :pid"),
+            {"pid": project_id},
+        )
+        has_content = int(chars_result.scalar() or 0) > 0
+        if state.result_data and any(
+            state.result_data.get(k) for k in state.result_data
+            if k.startswith("layer") and k.endswith("_built")
+        ):
+            rerun_mode = "resume"
         await sm.reset(project_id)
         state = None
+
+    force_regenerate = rerun_mode != "resume"
 
     if not state:
         templates = list_templates()
@@ -126,15 +139,36 @@ async def auto_run_pipeline(project_id: str, background_tasks: BackgroundTasks,
             "progress": 0,
             "phases": [{"name": p.name, "steps": len(p.steps), "human_gate": p.human_gate} for p in template.phases],
             "total_phases": len(template.phases),
+            "rerun_mode": rerun_mode,
         })
 
     async def _run():
-        async with async_session_factory() as task_db:
-            executor = await _get_executor(project_id, task_db)
-            await executor.auto_run(project_id)
+        try:
+            async with async_session_factory() as task_db:
+                executor = await _get_executor(project_id, task_db)
+                await executor.auto_run(project_id, force_regenerate=force_regenerate)
+        except Exception as e:
+            logger.error("流水线后台任务异常退出: project_id=%s, error=%s", project_id, e)
+            try:
+                async with async_session_factory() as err_db:
+                    sm = PipelineStateMachine(err_db)
+                    state = await sm.get_state(project_id)
+                    if state and state.status == PipelineStatus.RUNNING:
+                        await sm.mark_failed(project_id, f"后台任务异常退出: {str(e)[:500]}")
+                    from websocket.manager import ws_manager
+                    await ws_manager.broadcast_to_project(project_id, {
+                        "type": "pipeline_progress",
+                        "phase": "错误",
+                        "status": "failed",
+                        "message": f"流水线后台任务异常退出: {str(e)[:200]}",
+                        "progress": 0,
+                    })
+            except Exception as e2:
+                logger.error("流水线异常状态清理失败: %s", e2)
 
     background_tasks.add_task(_run)
-    return {"status": "started", "message": "流水线自动运行已启动，请关注顶部进度条"}
+    mode_label = "从头生成" if force_regenerate else "继续未完成部分"
+    return {"status": "started", "message": f"流水线自动运行已启动（{mode_label}），请关注顶部进度条", "rerun_mode": rerun_mode}
 
 
 @router.post("/cancel")
@@ -211,7 +245,7 @@ async def resume_pipeline(project_id: str, background_tasks: BackgroundTasks,
         async def _run():
             async with async_session_factory() as task_db:
                 executor = await _get_executor(project_id, task_db)
-                await executor.auto_run(project_id)
+                await executor.auto_run(project_id, force_regenerate=False)
 
         background_tasks.add_task(_run)
         return {

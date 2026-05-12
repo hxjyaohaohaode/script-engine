@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -230,8 +230,8 @@ class ScriptGenerationEngine:
                     "characters_involved": "[]",
                     "status": "pending",
                     "version": 1,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
                 }
 
                 await self.storage.create_scene(scene_data)
@@ -443,6 +443,10 @@ class ScriptGenerationEngine:
         best_result = None
         best_word_count = 0
 
+        rag_chunks = await self._retrieve_rag_context(
+            project_id, scene, chapter, project_data
+        )
+
         for attempt in range(self.SCENE_RETRY_MAX + 1):
             prompt = self._build_scene_prompt(
                 scene=scene,
@@ -453,6 +457,7 @@ class ScriptGenerationEngine:
                 total_scenes=total_scenes_in_chapter,
                 character_state_tracker=character_state_tracker or {},
                 target_scene_words=target_scene_words,
+                rag_chunks=rag_chunks,
             )
 
             emotion_level = scene.get("emotion_level", 5)
@@ -533,6 +538,65 @@ class ScriptGenerationEngine:
 
         raise RuntimeError(f"场景 {scene.get('scene_code')} 生成完全失败")
 
+    async def _retrieve_rag_context(self, project_id: str, scene: dict, chapter: dict, project_data: dict) -> list:
+        query_parts = []
+        scene_type = scene.get("scene_type", "")
+        scene_code = scene.get("scene_code", "")
+        emotion = scene.get("emotion_level", 5)
+        location = scene.get("location", "")
+        chapter_title = chapter.get("title", "")
+        chapter_summary = chapter.get("summary", "")
+
+        query_parts.append(f"场景{scene_code}")
+        if scene_type:
+            query_parts.append(f"类型{scene_type}")
+        if location:
+            query_parts.append(f"地点{location}")
+        if chapter_title:
+            query_parts.append(f"章节{chapter_title}")
+        if chapter_summary:
+            query_parts.append(chapter_summary[:200])
+        query_parts.append(project_data.get("core_contradiction", ""))
+        query_parts.append(f"情感{emotion}")
+
+        query = "，".join(filter(None, query_parts))
+
+        target_word_count = project_data.get("target_word_count", 50000)
+        top_k = self._get_rag_top_k(target_word_count)
+
+        try:
+            results = await self.rag.retrieve(
+                project_id=project_id, query=query, top_k=top_k
+            )
+            if results:
+                logger.info("RAG检索成功: 项目%s 场景%s → %d条结果 (top_k=%d, 剧本规模=%s)",
+                             project_id[:8], scene_code, len(results), top_k,
+                             self._get_script_scale(target_word_count))
+            return results
+        except Exception as e:
+            logger.warning("RAG检索失败: %s", e)
+            return []
+
+    @staticmethod
+    def _get_script_scale(target_word_count: int) -> str:
+        if target_word_count <= 20000:
+            return "短篇"
+        elif target_word_count <= 80000:
+            return "中篇"
+        else:
+            return "长篇"
+
+    @staticmethod
+    def _get_rag_top_k(target_word_count: int) -> int:
+        if target_word_count <= 20000:
+            return 6
+        elif target_word_count <= 50000:
+            return 10
+        elif target_word_count <= 80000:
+            return 15
+        else:
+            return 20
+
     def _build_system_prompt(self, project_data: dict, scene_type: str) -> str:
         genre = project_data.get("genre", "互动叙事")
         style = project_data.get("style", "现代白话")
@@ -592,6 +656,7 @@ class ScriptGenerationEngine:
         total_scenes: int,
         character_state_tracker: dict | None = None,
         target_scene_words: int = 2000,
+        rag_chunks: list | None = None,
     ) -> str:
         world = project_data["world_config"]
         chars = project_data["characters"]
@@ -708,6 +773,28 @@ class ScriptGenerationEngine:
 
         max_words = min(max_words, 5000)
 
+        rag_context = ""
+        if rag_chunks:
+            rag_parts = []
+            for chunk in rag_chunks:
+                if hasattr(chunk, "content_type"):
+                    ctype = chunk.content_type
+                    text = chunk.text
+                else:
+                    ctype = chunk.get("content_type", "") if isinstance(chunk, dict) else ""
+                    text = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                label = {"scene": "已生成场景参考", "character": "角色信息参考", "foreshadow": "伏笔信息参考"}.get(ctype, ctype)
+                rag_parts.append(f"【{label}】\n{text[:800]}")
+            rag_context = "\n\n".join(rag_parts) if rag_parts else ""
+
+        rag_section = ""
+        if rag_context:
+            rag_section = f"""━━━━━━━━━━━━━━━━━━━━━━
+🔍 RAG 检索到的相关上下文（已生成的场景/角色/伏笔）
+━━━━━━━━━━━━━━━━━━━━━━
+{rag_context}
+"""
+
         prompt = f"""请为以下场景创作完整的、文学性的剧本内容。
 
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -764,7 +851,7 @@ class ScriptGenerationEngine:
 ━━━━━━━━━━━━━━━━━━━━━━
 {prev_scene_content or '(本章第一个场景，请参考上一章结尾自然过渡)'}
 
-━━━━━━━━━━━━━━━━━━━━━━
+{rag_section}━━━━━━━━━━━━━━━━━━━━━━
 ✍️ 写作要求
 ━━━━━━━━━━━━━━━━━━━━━━
 

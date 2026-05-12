@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 
@@ -38,7 +38,7 @@ class Foreshadow(Base):
     reinforce_locations = Column(JSONType, default=list)
     reveal_location = Column(String(100), nullable=True)
     reclaim_status = Column(String(20), default="unplanted")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="foreshadows")
 
@@ -51,7 +51,7 @@ class ForeshadowRelation(Base):
     from_fs_id = Column(GUID, ForeignKey("foreshadows.id", ondelete="CASCADE"), nullable=False)
     to_fs_id = Column(GUID, ForeignKey("foreshadows.id", ondelete="CASCADE"), nullable=False)
     relation_type = Column(String(20), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="foreshadow_relations")
     from_fs = relationship("Foreshadow", foreign_keys=[from_fs_id])

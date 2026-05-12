@@ -113,57 +113,12 @@ function ScriptVizInner() {
 
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const fetchAnalysis = useCallback(async () => {
-    if (!currentProject?.id) return
-    setLoading(true)
-    setCardData(null)
-    setSelectedEdge(null)
-    try {
-      const data = await api.post<AnalysisData>(
-        `/script-viz/analyze-project/${currentProject.id}`
-      )
-      setAnalysisData(data)
-      buildGraph(data, viewMode)
-    } catch (e: any) {
-      notification.error({
-        message: '解析失败',
-        description: e?.message || '无法获取剧本数据',
-        placement: 'topRight',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }, [currentProject?.id, viewMode])
-
-  useEffect(() => {
-    fetchAnalysis()
-  }, [currentProject?.id])
-
-  useEffect(() => {
-    const unsubs = [
-      eventBus.on(DataEvents.SCENE_CREATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.SCENE_UPDATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.SCENE_DELETED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.SCENE_FINALIZED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.CHAPTER_CREATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.CHAPTER_UPDATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.CHARACTER_CREATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.CHARACTER_UPDATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.CHARACTER_DELETED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.RELATION_CREATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.RELATION_UPDATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.FORESHADOW_CREATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.FORESHADOW_UPDATED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.FORESHADOW_DELETED, () => fetchAnalysis()),
-      eventBus.on(DataEvents.PROJECT_SWITCHED, () => fetchAnalysis()),
-    ]
-    return () => unsubs.forEach(u => u())
-  }, [fetchAnalysis])
-
-  const buildGraph = useCallback((data: AnalysisData, mode: ViewMode) => {
+  const buildGraph = useCallback((data: AnalysisData, mode: ViewMode, options?: { preservePositions?: boolean }) => {
     const newNodes: Node[] = []
     const newEdges: Edge[] = []
     const nodePositions = new Map<string, { x: number; y: number }>()
+    const existingNodesMap = new Map<string, Node>()
+    nodes.forEach(n => existingNodesMap.set(n.id, n))
 
     const cols = 4
     const spacingX = 280
@@ -173,8 +128,11 @@ function ScriptVizInner() {
       data.characters.forEach((ch: any, i: number) => {
         const col = i % cols
         const row = Math.floor(i / cols)
-        const x = 100 + col * spacingX
-        const y = 80 + row * spacingY
+        const defaultX = 100 + col * spacingX
+        const defaultY = 80 + row * spacingY
+        const existing = options?.preservePositions ? existingNodesMap.get(ch.id) : undefined
+        const x = existing?.position?.x ?? defaultX
+        const y = existing?.position?.y ?? defaultY
         nodePositions.set(ch.id, { x, y })
 
         const sceneCount = data.scene_links.filter(
@@ -186,6 +144,8 @@ function ScriptVizInner() {
 
         newNodes.push({
           id: ch.id, type: 'character', position: { x, y },
+          width: existing?.width,
+          height: existing?.height,
           data: {
             label: ch.name, role_type: ch.role_type || 'supporting',
             core_goal: ch.core_goal || '', core_fear: ch.core_fear || '',
@@ -218,14 +178,19 @@ function ScriptVizInner() {
       data.scenes.forEach((sc: any, i: number) => {
         const col = i % cols
         const row = Math.floor(i / cols)
-        const x = 80 + col * spacingX
-        const y = 80 + row * spacingY
+        const defaultX = 80 + col * spacingX
+        const defaultY = 80 + row * spacingY
+        const existing = options?.preservePositions ? existingNodesMap.get(sc.id) : undefined
+        const x = existing?.position?.x ?? defaultX
+        const y = existing?.position?.y ?? defaultY
         nodePositions.set(sc.id, { x, y })
 
         const chCount = Array.isArray(sc.characters_involved) ? sc.characters_involved.length : 0
 
         newNodes.push({
           id: sc.id, type: 'scene', position: { x, y },
+          width: existing?.width,
+          height: existing?.height,
           data: {
             label: sc.scene_code, scene_code: sc.scene_code,
             scene_type: sc.scene_type || 'dialogue',
@@ -269,12 +234,17 @@ function ScriptVizInner() {
       sortedFs.forEach((fs: any, i: number) => {
         const col = i % fsCols
         const row = Math.floor(i / fsCols)
-        const x = 100 + col * spacingX
-        const y = 80 + row * spacingY
+        const defaultX = 100 + col * spacingX
+        const defaultY = 80 + row * spacingY
+        const existing = options?.preservePositions ? existingNodesMap.get(fs.id) : undefined
+        const x = existing?.position?.x ?? defaultX
+        const y = existing?.position?.y ?? defaultY
         nodePositions.set(fs.id, { x, y })
 
         newNodes.push({
           id: fs.id, type: 'foreshadow', position: { x, y },
+          width: existing?.width,
+          height: existing?.height,
           data: {
             label: fs.name || fs.fs_code, fs_code: fs.fs_code,
             fs_type: fs.fs_type || 'plot',
@@ -319,8 +289,11 @@ function ScriptVizInner() {
       )
 
       sortedScenes.forEach((sc: any, i: number) => {
-        const x = 80 + i * 220
-        const y = 150 + (i % 2 === 0 ? 0 : 140)
+        const defaultX = 80 + i * 220
+        const defaultY = 150 + (i % 2 === 0 ? 0 : 140)
+        const existing = options?.preservePositions ? existingNodesMap.get(sc.id) : undefined
+        const x = existing?.position?.x ?? defaultX
+        const y = existing?.position?.y ?? defaultY
         nodePositions.set(sc.id, { x, y })
 
         const sceneForeshadows = data.foreshadow_links.filter((l: any) =>
@@ -329,6 +302,8 @@ function ScriptVizInner() {
 
         newNodes.push({
           id: sc.id, type: 'scene', position: { x, y },
+          width: existing?.width,
+          height: existing?.height,
           data: {
             label: sc.scene_code, scene_code: sc.scene_code,
             scene_type: sc.scene_type || 'dialogue',
@@ -357,14 +332,63 @@ function ScriptVizInner() {
     setNodes(newNodes)
     setEdges(newEdges)
 
-    setTimeout(() => {
-      fitView({ padding: 0.2, duration: 500 })
-    }, 100)
-  }, [setNodes, setEdges, fitView])
+    if (!options?.preservePositions) {
+      setTimeout(() => {
+        fitView({ padding: 0.2, duration: 500 })
+      }, 100)
+    }
+  }, [setNodes, setEdges, fitView, nodes])
+
+  const fetchAnalysis = useCallback(async (options?: { preservePositions?: boolean }) => {
+    if (!currentProject?.id) return
+    setLoading(true)
+    setCardData(null)
+    setSelectedEdge(null)
+    try {
+      const data = await api.post<AnalysisData>(
+        `/script-viz/analyze-project/${currentProject.id}`
+      )
+      setAnalysisData(data)
+      buildGraph(data, viewMode, { preservePositions: options?.preservePositions !== false })
+    } catch (e: any) {
+      notification.error({
+        message: '解析失败',
+        description: e?.message || '无法获取剧本数据',
+        placement: 'topRight',
+      })
+    } finally {
+      setLoading(false)
+    }
+  }, [currentProject?.id, viewMode, buildGraph])
+
+  useEffect(() => {
+    fetchAnalysis({ preservePositions: false })
+  }, [currentProject?.id])
+
+  useEffect(() => {
+    const unsubs = [
+      eventBus.on(DataEvents.SCENE_CREATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.SCENE_UPDATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.SCENE_DELETED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.SCENE_FINALIZED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.CHAPTER_CREATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.CHAPTER_UPDATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.CHARACTER_CREATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.CHARACTER_UPDATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.CHARACTER_DELETED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.RELATION_CREATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.RELATION_UPDATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.FORESHADOW_CREATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.FORESHADOW_UPDATED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.FORESHADOW_DELETED, () => fetchAnalysis()),
+      eventBus.on(DataEvents.PROJECT_SWITCHED, () => fetchAnalysis()),
+    ]
+    return () => unsubs.forEach(u => u())
+  }, [fetchAnalysis])
 
   useEffect(() => {
     if (analysisData) {
-      buildGraph(analysisData, viewMode)
+      buildGraph(analysisData, viewMode, { preservePositions: false })
     }
   }, [viewMode])
 
@@ -427,7 +451,6 @@ function ScriptVizInner() {
           markerEnd: { type: MarkerType.ArrowClosed, width: 10, height: 10 },
         }
         setEdges((eds) => addEdge(newEdge, eds))
-        eventBus.emit(DataEvents.RELATION_CREATED)
       } else if (viewMode === 'foreshadows' && sourceNode.type === 'foreshadow' && targetNode.type === 'foreshadow') {
         const result = await foreshadowsApi.createRelation(currentProject.id, {
           from_fs_id: connection.source,
@@ -457,7 +480,6 @@ function ScriptVizInner() {
           style: { stroke: '#10b981' },
         }
         setEdges((eds) => addEdge(newEdge, eds))
-        eventBus.emit(DataEvents.FORESHADOW_CREATED)
       } else {
         notification.info({
           message: '暂不支持此连接',
@@ -532,7 +554,6 @@ function ScriptVizInner() {
       notification.success({ message: '连线已更新', placement: 'topRight' })
       setEdgeEditOpen(false)
       setSelectedEdge(null)
-      eventBus.emit(DataEvents.RELATION_UPDATED)
     } catch (e: any) {
       notification.error({
         message: '更新失败',
@@ -563,7 +584,6 @@ function ScriptVizInner() {
       notification.success({ message: '连线已删除', placement: 'topRight' })
       setEdgeEditOpen(false)
       setSelectedEdge(null)
-      eventBus.emit(DataEvents.RELATION_UPDATED)
     } catch (e: any) {
       notification.error({
         message: '删除失败',
@@ -756,7 +776,7 @@ function ScriptVizInner() {
   }
 
   return (
-    <div ref={containerRef} style={{ fontFamily: 'var(--font-family)', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)' }}>
+    <div ref={containerRef} style={{ fontFamily: 'var(--font-family)', display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexShrink: 0 }}>
         <div>
           <h2 className="section-title" style={{ fontSize: 24 }}>剧本可视化</h2>
@@ -788,7 +808,7 @@ function ScriptVizInner() {
             ]}
           />
 
-          <Button size="small" icon={<ReloadOutlined />} onClick={fetchAnalysis} loading={loading}>
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => fetchAnalysis()} loading={loading}>
             刷新
           </Button>
 
@@ -835,7 +855,7 @@ function ScriptVizInner() {
               <div className="text-center">
                 <p className="text-gray-400 mb-2">暂无数据</p>
                 <Space>
-                  <Button icon={<ReloadOutlined />} onClick={fetchAnalysis}>加载数据</Button>
+                  <Button icon={<ReloadOutlined />} onClick={() => fetchAnalysis()}>加载数据</Button>
                   <Upload accept=".txt,.md" showUploadList={false} beforeUpload={handleUploadParse as any}>
                     <Button icon={<UploadOutlined />}>导入剧本</Button>
                   </Upload>
@@ -1047,8 +1067,10 @@ function ScriptVizInner() {
 
 export default function ScriptViz() {
   return (
-    <ReactFlowProvider>
-      <ScriptVizInner />
-    </ReactFlowProvider>
+    <div className="h-full">
+      <ReactFlowProvider>
+        <ScriptVizInner />
+      </ReactFlowProvider>
+    </div>
   )
 }

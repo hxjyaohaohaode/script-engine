@@ -1,7 +1,7 @@
 import uuid
 from sqlalchemy import Column, String, Integer, Float, JSON, DateTime, Boolean, Text, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, UTC
 
 from database import Base
 
@@ -66,7 +66,7 @@ class ProjectConfig(Base):
     player_count = Column(String, default="single", comment="玩家模式：single/dual/multi")
     style = Column(String, default="", comment="风格标签")
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     project = relationship("Project", back_populates="config")

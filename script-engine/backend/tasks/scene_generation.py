@@ -1,7 +1,7 @@
 import logging
 from datetime import UTC, datetime
 
-from . import _safe_task_decorator as task_decorator, update_progress, push_progress_via_ws, update_agent_task_status, complete_agent_task, fail_agent_task, mark_agent_task_retrying, run_async, get_db_async
+from tasks._helpers import _safe_task_decorator as task_decorator, update_progress, push_progress_via_ws, update_agent_task_status, complete_agent_task, fail_agent_task, mark_agent_task_retrying, run_async, get_db_async
 
 logger = logging.getLogger(__name__)
 AGENT_NAME = "创作Agent"
@@ -29,12 +29,17 @@ def generate_scene_task(self, project_id: str, scene_id: str, requirements: dict
         update_progress(task_id, 60, "running", "解析结构化数据...", agent_name=AGENT_NAME, task_name=TASK_NAME)
         push_progress_via_ws(project_id, task_id, 60, "running", "解析结构化数据...", agent_name=AGENT_NAME, task_name=TASK_NAME)
 
-        scene_draft = _parse_scene_draft(scene_draft, requirements)
+        scene_draft = _parse_scene_draft(scene_draft, requirements, project_id)
 
         update_progress(task_id, 75, "running", "写入数据库...", agent_name=AGENT_NAME, task_name=TASK_NAME)
         push_progress_via_ws(project_id, task_id, 75, "running", "写入数据库...", agent_name=AGENT_NAME, task_name=TASK_NAME)
 
         _save_scene_to_db(scene_id, scene_draft)
+
+        update_progress(task_id, 85, "running", "同步状态数据...", agent_name=AGENT_NAME, task_name=TASK_NAME)
+        push_progress_via_ws(project_id, task_id, 85, "running", "同步状态数据...", agent_name=AGENT_NAME, task_name=TASK_NAME)
+
+        _sync_scene_state(project_id, scene_id, scene_draft)
 
         update_progress(task_id, 90, "running", "更新任务状态...", agent_name=AGENT_NAME, task_name=TASK_NAME)
         push_progress_via_ws(project_id, task_id, 90, "running", "更新任务状态...", agent_name=AGENT_NAME, task_name=TASK_NAME)
@@ -133,8 +138,9 @@ def _validate_scene_result(scene_data: dict) -> dict:
     return scene_data
 
 
-def _parse_scene_draft(scene_draft: dict, requirements: dict) -> dict:
+def _parse_scene_draft(scene_draft: dict, requirements: dict, project_id: str = "") -> dict:
     return {
+        "project_id": project_id or requirements.get("project_id", ""),
         "narration": scene_draft.get("narration", ""),
         "dialogue": scene_draft.get("dialogue", []),
         "actions": scene_draft.get("actions", []),
@@ -190,3 +196,58 @@ def _save_scene_to_db(scene_id: str, scene_draft: dict):
 
         db.commit()
         logger.info("Scene %s saved to database", scene_id)
+
+
+def _sync_scene_state(project_id: str, scene_id: str, scene_draft: dict):
+    from core.agent.base import AgentTask
+    from core.agent.registry import get_agent
+
+    try:
+        sync_result = run_async(_sync_scene_state_async(project_id, scene_id, scene_draft))
+        logger.info("Scene state sync completed: %s", sync_result)
+    except Exception as e:
+        logger.warning("Scene state sync failed (non-fatal): %s", str(e))
+
+
+async def _sync_scene_state_async(project_id: str, scene_id: str, scene_draft: dict):
+    from core.gateway.client import ModelGateway
+    from core.rag.retriever import RAGRetriever
+    from core.storage.service import StorageService
+    from core.agent.base import AgentTask
+    from core.agent.registry import get_agent
+
+    async with get_db_async() as db:
+        gateway = ModelGateway()
+        rag = RAGRetriever(db)
+        storage = StorageService(db)
+
+        try:
+            agent = get_agent("state_manager", gateway, rag, storage)
+
+            scene_data = {
+                "id": scene_id,
+                **scene_draft,
+            }
+
+            task = AgentTask(
+                task_id=f"{project_id}_state_sync_{scene_id}",
+                agent_name="state_manager",
+                task_type="state_updater",
+                project_id=project_id,
+                payload={
+                    "scene_id": scene_id,
+                    "operation": "update_from_scene",
+                    "previous_result": scene_data,
+                },
+                cost_profile="economy",
+            )
+
+            result = await agent.execute(task)
+
+            if result.status == "completed":
+                return result.data
+            else:
+                logger.warning("StateManager returned non-completed: %s", result.status)
+                return {"status": result.status}
+        finally:
+            await gateway.close()

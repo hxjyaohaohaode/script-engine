@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -25,7 +25,7 @@ class Chapter(Base):
     focus_characters = Column(JSONType, default=list, server_default="[]", nullable=False)
     worldview_refs = Column(JSONType, default=list, server_default="[]", nullable=False)
     status = Column(String(20), default="draft", server_default="draft", nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 
     project = relationship("Project", backref="chapters")
     scenes = relationship("Scene", back_populates="chapter", cascade="all, delete-orphan")
@@ -49,8 +49,8 @@ class ChapterSection(Base):
     branch_type = Column(String(50), default="exploration", server_default="exploration", nullable=False)
     summary = Column(Text, nullable=True)
     status = Column(String(20), default="draft", server_default="draft", nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), nullable=False)
 
     project = relationship("Project", backref="chapter_sections")
     chapter = relationship("Chapter", back_populates="sections")

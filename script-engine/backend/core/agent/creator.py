@@ -11,11 +11,18 @@ Skills:
 """
 
 import json
+from typing import Any, Callable, TypedDict
 
-from core.agent.base import BaseAgent, AgentTask, AgentResult
+from core.agent.base import BaseAgent, AgentTask, AgentResult, layer0_value
 from core.agent.skill import Skill
 from core.agent.registry import register_agent
-from services.llm_prompts import SCENE_GEN_UPGRADED_STANDARDS
+from core.agent.prompts import SCENE_GEN_UPGRADED_STANDARDS
+
+
+class _ThinkingModeRule(TypedDict):
+    max_tokens: int
+    temperature: float
+    conditions: Callable[[dict], bool]
 
 
 def parse_scene_draft(text: str) -> dict:
@@ -36,7 +43,31 @@ def parse_outline(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {"outline": text}
+        pass
+    import re
+    m = re.search(r'```json\s*([\s\S]*?)\s*```', text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    m = re.search(r'\[[\s\S]*\]', text)
+    if m:
+        try:
+            result = json.loads(m.group(0))
+            if isinstance(result, list):
+                return {"chapters": result}
+        except json.JSONDecodeError:
+            pass
+    m = re.search(r'\{[\s\S]*\}', text)
+    if m:
+        try:
+            result = json.loads(m.group(0))
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+    return {"outline": text}
 
 
 SCENE_WRITER_SKILL = Skill()
@@ -450,6 +481,7 @@ class CreatorAgent(BaseAgent):
         "scene_writer": SCENE_WRITER_SKILL,
         "dialogue_writer": DIALOGUE_WRITER_SKILL,
         "branch_designer": BRANCH_DESIGNER_SKILL,
+        "choice_designer": BRANCH_DESIGNER_SKILL,
         "world_builder": WORLD_BUILDER_SKILL,
         "character_designer": CHARACTER_DESIGNER_SKILL,
         "relation_network_designer": RELATION_NETWORK_DESIGNER_SKILL,
@@ -457,7 +489,7 @@ class CreatorAgent(BaseAgent):
         "chapter_outliner": OUTLINE_WRITER_SKILL,
     }
 
-    THINKING_MODE_RULES = {
+    THINKING_MODE_RULES: dict[str, _ThinkingModeRule] = {
         "quick": {
             "max_tokens": 16384,
             "temperature": 0.7,
@@ -502,7 +534,7 @@ class CreatorAgent(BaseAgent):
             return int(12000 * scale_factor)
         if task_type == "dialogue_writer":
             return 8000
-        if task_type == "outline_writer":
+        if task_type == "outline_writer" or task_type == "chapter_outliner":
             target_word_count = payload.get("target_word_count", 50000)
             scale_factor = min(2.0, max(1.0, target_word_count / 50000))
             return int(16000 * scale_factor)
@@ -511,7 +543,10 @@ class CreatorAgent(BaseAgent):
             scale_factor = min(2.0, max(1.0, target_word_count / 50000))
             return int(12000 * scale_factor)
         if task_type == "relation_network_designer":
-            return 12000
+            target_word_count = payload.get("target_word_count", 50000)
+            character_count = payload.get("character_count", 8)
+            scale_factor = min(3.0, max(1.5, character_count / 8))
+            return int(32768 * scale_factor)
         return None
 
     def _resolve_temperature(self, task_type: str, payload: dict) -> float | None:
@@ -522,7 +557,7 @@ class CreatorAgent(BaseAgent):
             if scene_type == "transition":
                 return 0.75
             return 0.8
-        if task_type == "outline_writer":
+        if task_type == "outline_writer" or task_type == "chapter_outliner":
             return 0.7
         return None
 
@@ -638,7 +673,7 @@ class CreatorAgent(BaseAgent):
             project_id, rag_query, top_k=10
         )
 
-        context = {
+        context: dict[str, Any] = {
             "layer0": self._format_layer0(layer0),
             "world_settings": self._format_world_settings(layer0, world_config),
             "rag_context": "\n---\n".join(r.text for r in rag_results),
@@ -650,39 +685,39 @@ class CreatorAgent(BaseAgent):
 
         if task.task_type == "world_builder":
             context["user_requirements"] = payload.get("user_requirements", "")
-            context["genre"] = payload.get("genre", layer0.get("genre", {}).get("value", ""))
-            context["style"] = payload.get("style", layer0.get("style", {}).get("value", ""))
-            context["core_contradiction"] = payload.get("core_contradiction", layer0.get("core_contradiction", {}).get("value", ""))
+            context["genre"] = payload.get("genre", layer0_value(layer0, "genre"))
+            context["style"] = payload.get("style", layer0_value(layer0, "style"))
+            context["core_contradiction"] = payload.get("core_contradiction", layer0_value(layer0, "core_contradiction"))
             context["target_word_count"] = payload.get("target_word_count", 50000)
             context["world_depth"] = payload.get("world_depth", 5)
 
         elif task.task_type == "character_designer":
             world_setting_text = self._format_world_settings(layer0, world_config)
             if not world_setting_text or world_setting_text == "世界观尚未详细设定":
-                world_setting_text = payload.get("world_settings", payload.get("world_setting", ""))
+                world_setting_text = str(payload.get("world_settings") or payload.get("world_setting") or "")
             context["world_setting"] = world_setting_text
-            context["core_contradiction"] = payload.get("core_contradiction", layer0.get("core_contradiction", {}).get("value", ""))
+            context["core_contradiction"] = payload.get("core_contradiction", layer0_value(layer0, "core_contradiction"))
             context["character_count"] = payload.get("character_count", 8)
             context["character_depth"] = payload.get("character_depth", 5)
             context["target_word_count"] = payload.get("target_word_count", 50000)
-            context["genre"] = payload.get("genre", layer0.get("genre", {}).get("value", ""))
+            context["genre"] = payload.get("genre", layer0_value(layer0, "genre"))
 
         elif task.task_type == "relation_network_designer":
             world_setting_text = self._format_world_settings(layer0, world_config)
             if not world_setting_text or world_setting_text == "世界观尚未详细设定":
-                world_setting_text = payload.get("world_settings", payload.get("world_setting", ""))
+                world_setting_text = str(payload.get("world_settings") or payload.get("world_setting") or "")
             context["world_setting"] = world_setting_text
-            context["core_contradiction"] = payload.get("core_contradiction", layer0.get("core_contradiction", {}).get("value", ""))
+            context["core_contradiction"] = payload.get("core_contradiction", layer0_value(layer0, "core_contradiction"))
             chars = await self.storage.get_character_states(project_id)
             if not chars:
                 chars = payload.get("characters", [])
             context["characters"] = json.dumps(chars, ensure_ascii=False) if isinstance(chars, list) else str(chars)
-            context["genre"] = payload.get("genre", layer0.get("genre", {}).get("value", ""))
+            context["genre"] = payload.get("genre", layer0_value(layer0, "genre"))
 
-        elif task.task_type == "outline_writer":
+        elif task.task_type in ("outline_writer", "chapter_outliner"):
             world_setting_text = self._format_world_settings(layer0, world_config)
             if not world_setting_text or world_setting_text == "世界观尚未详细设定":
-                world_setting_text = payload.get("world_settings", payload.get("world_setting", ""))
+                world_setting_text = str(payload.get("world_settings") or payload.get("world_setting") or "")
             context["world_setting"] = world_setting_text
             chars = await self.storage.get_character_states(project_id)
             if not chars:
@@ -697,9 +732,9 @@ class CreatorAgent(BaseAgent):
             context["min_words_per_chapter"] = payload.get("min_words_per_chapter", 2000)
             context["max_words_per_chapter"] = payload.get("max_words_per_chapter", 8000)
             context["plot_complexity"] = payload.get("plot_complexity", 5)
-            context["genre"] = payload.get("genre", layer0.get("genre", {}).get("value", ""))
+            context["genre"] = payload.get("genre", layer0_value(layer0, "genre"))
 
-        elif task.task_type == "scene_writer":
+        elif task.task_type in ("scene_writer",):
             scene_id = payload.get("scene_id")
             if scene_id:
                 prev_scenes = await self.storage.get_prev_scenes(scene_id, count=2)
@@ -708,8 +743,8 @@ class CreatorAgent(BaseAgent):
                 scene = await self.storage.get_scene(project_id, scene_id)
                 if scene:
                     context["scene_code"] = scene.get("scene_code", "")
-                    context["genre"] = payload.get("genre", layer0.get("genre", {}).get("value", ""))
-                    context["style"] = payload.get("style", layer0.get("style", {}).get("value", ""))
+                    context["genre"] = payload.get("genre", layer0_value(layer0, "genre"))
+                    context["style"] = payload.get("style", layer0_value(layer0, "style"))
                     context["scene_type"] = scene.get("scene_type", "dialogue")
                     context["location"] = scene.get("location", "未指定")
                     context["weather"] = scene.get("weather", "未指定")
@@ -755,8 +790,8 @@ class CreatorAgent(BaseAgent):
                 if selected_chapter:
                     ch_num = selected_chapter.get("chapter_number", current_ch_idx + 1)
                     context["scene_code"] = f"CH{ch_num:03d}_S{scene_num:03d}"
-                    context["genre"] = payload.get("genre", layer0.get("genre", {}).get("value", ""))
-                    context["style"] = payload.get("style", layer0.get("style", {}).get("value", ""))
+                    context["genre"] = payload.get("genre", layer0_value(layer0, "genre"))
+                    context["style"] = payload.get("style", layer0_value(layer0, "style"))
                     context["scene_type"] = "dialogue"
                     context["location"] = "根据章节大纲自由设定"
                     context["weather"] = "根据场景氛围自由设定"
@@ -782,6 +817,27 @@ class CreatorAgent(BaseAgent):
                 context["genre"] = payload.get("genre", "互动影游")
             if not context.get("style"):
                 context["style"] = payload.get("style", "写实")
+
+        elif task.task_type in ("choice_designer", "branch_designer"):
+            chars = await self.storage.get_character_states(project_id)
+            if not chars:
+                chars = payload.get("characters", [])
+            context["character_states"] = self._format_characters(chars)
+            fs_list = await self.storage.get_foreshadows(project_id)
+            if not fs_list:
+                fs_list = payload.get("foreshadows", [])
+            context["foreshadow_tasks"] = self._format_foreshadows(fs_list)
+            context["max_branch_depth"] = payload.get("max_branch_depth", 3)
+            context["min_branches"] = payload.get("min_branches", 2)
+            context["max_branches"] = payload.get("max_branches", 3)
+            context["target_ending_count"] = payload.get("target_ending_count", 3)
+            scenes = await self.storage.get_all_scenes_ordered(project_id)
+            if not scenes:
+                scenes = payload.get("scenes", [])
+            scene_summaries = []
+            for s in scenes[:10]:
+                scene_summaries.append(f"- {s.get('scene_code', '?')}: {s.get('narration', '')[:200]}")
+            context["scene_summary"] = "\n".join(scene_summaries) if scene_summaries else "暂无已生成场景"
 
         return context
 

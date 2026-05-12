@@ -1,5 +1,5 @@
 name: interactive_drama
-description: "互动影游，20万字+，分支+伏笔+审计流水线。默认模板。"
+description: "互动影游，完整剧本生成（世界观→角色→伏笔→大纲→场景→对白→选择支→终审）。默认模板。"
 scale_config:
   light:
     max_parallel: 2
@@ -12,7 +12,7 @@ scale_config:
     audit_skills: [llm_audit, creative_score]
 
 phases:
-  - name: 设定
+  - name: 素材准备
     human_gate: false
     steps:
       - agent: creator
@@ -46,7 +46,7 @@ phases:
         cost_profile: quality
         timeout: 600
 
-  - name: 大纲
+  - name: 章节大纲
     human_gate: false
     steps:
       - agent: creator
@@ -56,19 +56,19 @@ phases:
         cost_profile: quality
         timeout: 900
 
-  - name: 场景创作
+  - name: 场景写作
     human_gate: false
     repeat_until: all_scenes_done
     steps:
       - agent: material
         skill: rag_retriever
-        input_from: [layer0, layer1, layer3]
+        input_from: [layer0, layer3]
         output_to: next_step
         cost_profile: economy
         timeout: 300
       - agent: creator
         skill: scene_writer
-        input_from: [next_step, layer0]
+        input_from: [next_step, layer0, layer3]
         output_to: layer2
         cost_profile: quality
         timeout: 900
@@ -101,7 +101,7 @@ phases:
         cost_profile: economy
         timeout: 300
 
-  - name: 终审
+  - name: 最终审查
     human_gate: true
     steps:
       - agent: auditor

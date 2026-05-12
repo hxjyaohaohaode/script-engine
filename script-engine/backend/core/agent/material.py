@@ -65,6 +65,23 @@ class MaterialAgent(BaseAgent):
             if context_type == "doc_read":
                 return await self._handle_doc_read(project_id, task.payload)
 
+            if not scene_id:
+                scene_plan = await self._plan_next_scene(project_id, task.payload)
+                if scene_plan.get("status") == "all_done":
+                    return AgentResult(
+                        status="completed",
+                        data=scene_plan,
+                    )
+                if scene_plan.get("status") == "no_chapters":
+                    return AgentResult(
+                        status="completed",
+                        data=scene_plan,
+                    )
+                return AgentResult(
+                    status="completed",
+                    data=scene_plan,
+                )
+
             context_pack = await self._build_context_pack(
                 project_id, scene_id, context_type, rag_query
             )
@@ -88,8 +105,8 @@ class MaterialAgent(BaseAgent):
     async def _build_context(self, task: AgentTask) -> dict:
         return {}
 
-    def _select_skill(self, task_type: str):
-        return self.skills.get(task_type)
+    def _select_skill(self, task_type: str) -> Skill:
+        return self.skills[task_type]
 
     async def _handle_index_query(self, project_id: str, payload: dict) -> AgentResult:
         query_type = payload.get("query_type", "keyword")
@@ -143,6 +160,93 @@ class MaterialAgent(BaseAgent):
             status="completed",
             data={"scene_id": scene_id, "content": content, "found": content is not None},
         )
+
+    async def _plan_next_scene(self, project_id: str, payload: dict) -> dict:
+        """智能规划下一个待写场景，返回场景元数据和上下文包。"""
+        chapters = payload.get("chapters", [])
+        if not chapters:
+            chapters = await self.storage.get_chapter_outlines(project_id)
+
+        if not chapters:
+            return {"status": "no_chapters", "message": "尚无章节大纲，无法规划场景"}
+
+        scenes_per_chapter_max = payload.get("scenes_per_chapter_max", 6)
+        scenes_per_chapter_min = payload.get("scenes_per_chapter_min", 3)
+
+        target_chapter = None
+        target_scene_num = 1
+        target_chapter_idx = 0
+        prev_scenes_text = ""
+
+        for ch_idx, ch in enumerate(chapters):
+            ch_id = str(ch.get("id", ""))
+            existing_scenes = await self.storage.get_scenes_by_chapter(project_id, ch_id)
+            if len(existing_scenes) < scenes_per_chapter_max:
+                target_chapter = ch
+                target_scene_num = len(existing_scenes) + 1
+                target_chapter_idx = ch_idx
+                if existing_scenes:
+                    prev_lines = []
+                    for es in existing_scenes[-3:]:
+                        snippet = (es.get("narration", "") or "")[:500]
+                        prev_lines.append(f"[{es.get('scene_code', '?')}] {snippet}")
+                    prev_scenes_text = "\n".join(prev_lines)
+                break
+
+        if not target_chapter:
+            return {"status": "all_done", "message": "所有章节的场景数已达到上限"}
+
+        ch_num = target_chapter.get("chapter_number", target_chapter_idx + 1)
+        scene_code = f"CH{int(ch_num):03d}_S{target_scene_num:03d}"
+
+        sections = []
+        total_chars = 0
+
+        p1_content, p1_chars = await self._build_layer0(project_id)
+        sections.append({"name": "Layer 0 - 世界观设定", "content": p1_content, "priority": 1})
+        total_chars += p1_chars
+
+        if prev_scenes_text:
+            sections.append({"name": "前序场景摘要", "content": prev_scenes_text, "priority": 2})
+            total_chars += len(prev_scenes_text)
+
+        p3_content, p3_chars = await self._build_character_states(project_id)
+        sections.append({"name": "角色档案", "content": p3_content, "priority": 3})
+        total_chars += p3_chars
+
+        ch_id = str(target_chapter.get("id", ""))
+        if ch_id:
+            p4_content, p4_chars = await self._build_chapter_context(ch_id)
+            sections.append({"name": "章节上下文", "content": p4_content, "priority": 4})
+            total_chars += p4_chars
+
+        p6_content, p6_chars = await self._build_master_plan(project_id)
+        sections.append({"name": "大纲总览", "content": p6_content, "priority": 5})
+        total_chars += p6_chars
+
+        rag_query = f"{target_chapter.get('title', '')} {target_chapter.get('summary', '')} 场景{target_scene_num}"
+        rag_results = await self.rag.retrieve(project_id, rag_query, top_k=3)
+        if rag_results:
+            rag_content = "\n---\n".join(r.text for r in rag_results)
+            sections.append({"name": "RAG 参考素材", "content": rag_content, "priority": 6})
+
+        sections = self._trim_context(sections, MAX_CONTEXT_CHARS)
+
+        return {
+            "status": "planned",
+            "scene_code": scene_code,
+            "scene_num": target_scene_num,
+            "chapter_id": ch_id,
+            "chapter_number": ch_num,
+            "chapter_title": target_chapter.get("title", ""),
+            "chapter_summary": target_chapter.get("summary", ""),
+            "emotion_target": target_chapter.get("emotion_target", 5),
+            "chapter_core_conflict": target_chapter.get("core_conflict", ""),
+            "sections": sections,
+            "total_chars": sum(s.get("char_count", len(s["content"])) for s in sections),
+            "current_chapter_index": target_chapter_idx,
+            "scenes_in_chapter_so_far": target_scene_num - 1,
+        }
 
     async def _build_context_pack(
         self, project_id: str, scene_id: str, context_type: str, rag_query: str = ""

@@ -20,6 +20,9 @@ from middleware.audit_log import AuditLogger, AuditLoggingMiddleware
 from api import projects, characters, foreshadows, scenes, chapters, ai, export, pipeline, templates, script_viz
 from websocket.router import router as ws_router
 import models
+import core.pipeline.pipeline_state_model
+import core.rag.embedding_model
+import core.gateway.token_usage_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -109,6 +112,30 @@ async def lifespan(app: FastAPI):
                 conn.execute("ALTER TABLE characters ADD COLUMN dark_secret TEXT")
                 conn.commit()
                 logger.info("数据库迁移：已为 characters 表添加 dark_secret 列")
+            if "location" not in char_cols:
+                conn.execute("ALTER TABLE characters ADD COLUMN location VARCHAR(100)")
+                conn.commit()
+            if "emotional_state" not in char_cols:
+                conn.execute("ALTER TABLE characters ADD COLUMN emotional_state VARCHAR(50)")
+                conn.commit()
+            if "physical_state" not in char_cols:
+                conn.execute("ALTER TABLE characters ADD COLUMN physical_state VARCHAR(50)")
+                conn.commit()
+            if "current_goal" not in char_cols:
+                conn.execute("ALTER TABLE characters ADD COLUMN current_goal TEXT")
+                conn.commit()
+            if "known_info" not in char_cols:
+                conn.execute("ALTER TABLE characters ADD COLUMN known_info TEXT DEFAULT '[]'")
+                conn.commit()
+
+            cursor.execute("PRAGMA table_info(character_relations)")
+            rel_cols = [row[1] for row in cursor.fetchall()]
+            if "value" not in rel_cols:
+                conn.execute("ALTER TABLE character_relations ADD COLUMN value INTEGER DEFAULT 50")
+                conn.commit()
+            if "last_interaction" not in rel_cols:
+                conn.execute("ALTER TABLE character_relations ADD COLUMN last_interaction VARCHAR(50)")
+                conn.commit()
 
             cursor.execute("PRAGMA table_info(scenes)")
             scene_cols = [row[1] for row in cursor.fetchall()]

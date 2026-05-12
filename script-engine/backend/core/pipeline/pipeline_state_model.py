@@ -3,7 +3,7 @@ PipelineState 数据库模型。
 兼容SQLite和PostgreSQL，不使用PG专有类型。
 """
 
-from datetime import datetime
+from datetime import datetime, UTC
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 
@@ -24,6 +24,6 @@ class PipelineState(Base):
     task_results = Column(Text, default="[]")
     config = Column(Text, default="{}")
     run_id = Column(String(36), nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
     project = relationship("Project", backref="pipeline_state")

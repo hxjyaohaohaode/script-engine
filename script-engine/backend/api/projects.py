@@ -775,7 +775,7 @@ async def get_dashboard(project_id: str, db: AsyncSession = Depends(get_db)):
             "scene_count": scene_count,
             "scenes_draft": status_counts.get("draft", 0),
             "scenes_auditing": status_counts.get("auditing", 0),
-            "scenes_approved": status_counts.get("approved", 0),
+            "scenes_approved": status_counts.get("approved", 0) + status_counts.get("passed", 0),
             "scenes_final": status_counts.get("final", 0),
             "foreshadow_count": foreshadow_count,
             "foreshadows_normal": foreshadows_normal,

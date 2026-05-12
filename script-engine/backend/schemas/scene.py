@@ -5,7 +5,7 @@ from typing import Optional, Any
 from pydantic import BaseModel, Field, field_validator
 
 SCENE_CODE_PATTERN = re.compile(r"^(CH\d{2}-S\d{2}(-[A-Z])?|SC-\d{3,})$")
-VALID_SCENE_STATUS = ["draft", "auditing", "rejected", "approved", "final"]
+VALID_SCENE_STATUS = ["draft", "auditing", "passed", "rejected", "approved", "final"]
 
 
 class SceneCreate(BaseModel):
@@ -128,6 +128,7 @@ class SceneResponse(BaseModel):
     audit_reports: Any = []
     human_reviewed: bool = False
     human_feedback: Optional[str] = None
+    suggestions: Any = []
     git_commit_hash: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
